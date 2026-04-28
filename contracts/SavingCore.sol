@@ -1,0 +1,566 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
+import "./VaultManager.sol";
+
+/// @title SavingCore
+/// @notice Manages saving plans and deposit certificates (ERC721 NFTs).
+///         Users lock tokens for a fixed tenor, earn simple interest, and can
+///         withdraw, manually renew, or be auto-renewed after the grace period.
+contract SavingCore is ERC721, Ownable, Pausable {
+    using SafeERC20 for IERC20;
+
+    // ─────────────────────── Constants ───────────────────────
+
+    uint256 public constant SECONDS_PER_YEAR = 365 * 24 * 3600;
+    uint256 public constant BPS_DENOMINATOR   = 10_000;
+    uint256 public constant GRACE_PERIOD      = 3 days;
+
+    // ─────────────────────── Types ───────────────────────
+
+    /// @notice Status of a deposit certificate
+    enum DepositStatus { Active, Withdrawn, ManualRenewed, AutoRenewed }
+
+    /// @notice A saving plan created by the admin
+    struct SavingPlan {
+        uint256 tenorDays;
+        uint256 aprBps;           // Annual Percentage Rate in basis points
+        uint256 minDeposit;       // 0 = no minimum
+        uint256 maxDeposit;       // 0 = no maximum
+        uint256 earlyWithdrawPenaltyBps;
+        bool    enabled;
+    }
+
+    /// @notice A deposit certificate (minted as ERC721)
+    struct DepositCert {
+        uint256 planId;
+        uint256 principal;        // tokens locked (smallest unit)
+        uint256 aprBpsAtOpen;     // snapshot of APR at open time
+        uint256 penaltyBpsAtOpen; // snapshot of penalty at open time
+        uint256 tenorDays;        // snapshot of tenor at open time
+        uint256 startAt;
+        uint256 maturityAt;
+        DepositStatus status;
+    }
+
+    // ─────────────────────── State ───────────────────────
+
+    IERC20       public immutable token;
+    VaultManager public immutable vault;
+
+    uint256 public nextPlanId;
+    uint256 public nextDepositId;
+
+    mapping(uint256 => SavingPlan)  public plans;
+    mapping(uint256 => DepositCert) public deposits;
+
+    /// @notice Tổng tiền gốc đang khoá trong contract (đối soát)
+    uint256 public totalPrincipalLocked;
+
+    /// @notice Tổng lãi phải trả khi tất cả deposit đáo hạn (worst-case)
+    uint256 public totalInterestOwed;
+
+    /// @notice Số lần withdraw trong vòng 1 giờ gần nhất (chống drain attack)
+    uint256 public withdrawCountLastHour;
+    uint256 public withdrawWindowStart;
+
+    /// @notice Giới hạn withdraw trong 1 giờ (admin set, 0 = không giới hạn)
+    uint256 public maxWithdrawPerHour;
+
+    /// @notice Tổng tiền rút ra trong 1 giờ gần nhất
+    uint256 public withdrawAmountLastHour;
+
+    /// @notice Giới hạn tổng tiền rút trong 1 giờ (0 = không giới hạn)  
+    uint256 public maxWithdrawAmountPerHour;
+
+    // ─────────────────────── Events ───────────────────────
+
+    event PlanCreated(uint256 indexed planId, uint256 tenorDays, uint256 aprBps);
+    event PlanUpdated(uint256 indexed planId, uint256 newAprBps);
+    event PlanEnabled(uint256 indexed planId);
+    event PlanDisabled(uint256 indexed planId);
+    event DepositOpened(
+        uint256 indexed depositId,
+        address indexed owner,
+        uint256 indexed planId,
+        uint256 principal,
+        uint256 maturityAt,
+        uint256 aprBpsAtOpen
+    );
+    event Withdrawn(
+        uint256 indexed depositId,
+        address indexed owner,
+        uint256 principal,
+        uint256 interest,
+        bool    isEarly
+    );
+    event Renewed(
+        uint256 indexed oldDepositId,
+        uint256 indexed newDepositId,
+        uint256 newPrincipal,
+        uint256 indexed newPlanId
+    );
+
+    /// @notice Phát ra khi phát hiện bất thường — Admin nên kiểm tra ngay
+    event SecurityAlert(string reason, address indexed triggeredBy, uint256 amount);
+
+    /// @notice Phát ra khi penalty được chuyển đến feeReceiver
+    event PenaltyCollected(uint256 indexed depositId, address indexed receiver, uint256 amount);
+
+    /// @notice Phát ra khi vault không đủ lãi — user vẫn nhận được gốc
+    event InterestShortfall(
+        uint256 indexed depositId,
+        address indexed owner,
+        uint256 principal,
+        uint256 interestOwed,
+        uint256 interestPaid
+    );
+
+    // ─────────────────────── Errors ───────────────────────
+
+    error PlanNotFound(uint256 planId);
+    error PlanIsDisabled(uint256 planId);
+    error AmountBelowMinimum(uint256 amount, uint256 min);
+    error AmountAboveMaximum(uint256 amount, uint256 max);
+    error DepositNotActive(uint256 depositId);
+    error NotDepositOwner(uint256 depositId, address caller);
+    error DepositNotMatured(uint256 depositId, uint256 maturityAt, uint256 now_);
+    error GracePeriodNotExpired(uint256 depositId, uint256 gracePeriodEnd, uint256 now_);
+    error ZeroAmount();
+    error InvalidApr();
+    error VaultInsufficientForInterest(uint256 available, uint256 required);
+    error WithdrawRateLimitExceeded();
+    error WithdrawAmountLimitExceeded();
+
+    // ─────────────────────── Constructor ───────────────────────
+
+    /// @param _token   ERC20 token address (MockUSDC)
+    /// @param _vault   VaultManager address
+    constructor(address _token, address _vault)
+        ERC721("Saving Certificate", "SCERT")
+        Ownable(msg.sender)
+    {
+        token = IERC20(_token);
+        vault = VaultManager(_vault);
+    }
+
+    // ─────────────────────── Admin ───────────────────────
+
+    /// @notice Create a new saving plan
+    /// @param tenorDays                Length of deposit in days
+    /// @param aprBps                   Annual rate in basis points (e.g. 250 = 2.5%)
+    /// @param minDeposit               Minimum deposit amount (0 = none)
+    /// @param maxDeposit               Maximum deposit amount (0 = none)
+    /// @param earlyWithdrawPenaltyBps  Penalty in bps for early withdrawal
+    function createPlan(
+        uint256 tenorDays,
+        uint256 aprBps,
+        uint256 minDeposit,
+        uint256 maxDeposit,
+        uint256 earlyWithdrawPenaltyBps
+    ) external onlyOwner {
+        if (aprBps == 0) revert InvalidApr();
+        uint256 planId = nextPlanId++;
+        plans[planId] = SavingPlan({
+            tenorDays:               tenorDays,
+            aprBps:                  aprBps,
+            minDeposit:              minDeposit,
+            maxDeposit:              maxDeposit,
+            earlyWithdrawPenaltyBps: earlyWithdrawPenaltyBps,
+            enabled:                 true
+        });
+        emit PlanCreated(planId, tenorDays, aprBps);
+    }
+
+    /// @notice Update the APR of an existing plan (does not affect open deposits)
+    function updatePlan(uint256 planId, uint256 newAprBps) external onlyOwner {
+        _requirePlanExists(planId);
+        if (newAprBps == 0) revert InvalidApr();
+        plans[planId].aprBps = newAprBps;
+        emit PlanUpdated(planId, newAprBps);
+    }
+
+    /// @notice Enable a plan so users can open new deposits
+    function enablePlan(uint256 planId) external onlyOwner {
+        _requirePlanExists(planId);
+        plans[planId].enabled = true;
+        emit PlanEnabled(planId);
+    }
+
+    /// @notice Disable a plan — existing deposits are unaffected
+    function disablePlan(uint256 planId) external onlyOwner {
+        _requirePlanExists(planId);
+        plans[planId].enabled = false;
+        emit PlanDisabled(planId);
+    }
+
+    /// @notice Đặt giới hạn số lần rút trong 1 giờ (0 = tắt giới hạn)
+    function setWithdrawRateLimit(uint256 maxCount, uint256 maxAmount) external onlyOwner {
+        maxWithdrawPerHour = maxCount;
+        maxWithdrawAmountPerHour = maxAmount;
+    }
+
+    /// @notice Admin kiểm tra tính toàn vẹn — nếu lệch thì có thể bị hack
+    /// @return isIntact  true nếu số dư khớp với sổ sách
+    /// @return actual    số dư thực tế trong contract
+    /// @return expected  số dư theo sổ sách (totalPrincipalLocked)
+    /// @return diff      chênh lệch (nếu > 0 nghĩa là thiếu tiền)
+    function integrityCheck() external view returns (
+        bool isIntact,
+        uint256 actual,
+        uint256 expected,
+        uint256 diff
+    ) {
+        actual   = token.balanceOf(address(this));
+        expected = totalPrincipalLocked;
+        isIntact = actual >= expected;
+        diff     = isIntact ? 0 : expected - actual;
+    }
+
+    /// @notice Emergency pause — all user actions blocked
+    function pause() external onlyOwner { _pause(); }
+
+    /// @notice Resume normal operation
+    function unpause() external onlyOwner { _unpause(); }
+
+    // ─────────────────────── User flows ───────────────────────
+
+    /// @notice Open a new deposit
+    /// @param planId   ID of an enabled saving plan
+    /// @param amount   Token amount in smallest unit
+    /// @return depositId The minted NFT token ID
+    function openDeposit(uint256 planId, uint256 amount)
+        external
+        whenNotPaused
+        returns (uint256 depositId)
+    {
+        if (amount == 0) revert ZeroAmount();
+        SavingPlan storage plan = _requirePlanEnabled(planId);
+        if (plan.minDeposit > 0 && amount < plan.minDeposit)
+            revert AmountBelowMinimum(amount, plan.minDeposit);
+        if (plan.maxDeposit > 0 && amount > plan.maxDeposit)
+            revert AmountAboveMaximum(amount, plan.maxDeposit);
+
+        // Transfer principal from user to this contract
+        token.safeTransferFrom(msg.sender, address(this), amount);
+
+        // Snapshot plan details and mint NFT
+        depositId = nextDepositId++;
+        uint256 maturityAt = block.timestamp + plan.tenorDays * 1 days;
+
+        deposits[depositId] = DepositCert({
+            planId:           planId,
+            principal:        amount,
+            aprBpsAtOpen:     plan.aprBps,
+            penaltyBpsAtOpen: plan.earlyWithdrawPenaltyBps,
+            tenorDays:        plan.tenorDays,
+            startAt:          block.timestamp,
+            maturityAt:       maturityAt,
+            status:           DepositStatus.Active
+        });
+
+        // Track totals for reconciliation
+        uint256 interestOwed = _calcInterest(amount, plan.aprBps, plan.tenorDays * 1 days);
+        totalPrincipalLocked += amount;
+        totalInterestOwed    += interestOwed;
+
+        _safeMint(msg.sender, depositId);
+
+        emit DepositOpened(depositId, msg.sender, planId, amount, maturityAt, plan.aprBps);
+    }
+
+    /// @notice Withdraw a matured deposit (principal + interest)
+    /// @param depositId The NFT token ID
+    function withdrawAtMaturity(uint256 depositId) external whenNotPaused {
+        DepositCert storage cert = _requireActiveDeposit(depositId);
+        _requireOwner(depositId);
+
+        if (block.timestamp < cert.maturityAt)
+            revert DepositNotMatured(depositId, cert.maturityAt, block.timestamp);
+
+        // Rate limit check
+        _checkWithdrawRateLimit(msg.sender, cert.principal);
+
+        uint256 interest = _calcInterest(
+            cert.principal,
+            cert.aprBpsAtOpen,
+            cert.tenorDays * 1 days
+        );
+
+        cert.status = DepositStatus.Withdrawn;
+
+        // Update tracking
+        totalPrincipalLocked -= cert.principal;
+        totalInterestOwed    -= interest;
+
+        // Return principal — always safe (held in this contract)
+        token.safeTransfer(msg.sender, cert.principal);
+
+        // Pay interest from vault — if vault short, pay what's available
+        uint256 vaultAvail = vault.vaultBalance();
+        if (vaultAvail >= interest) {
+            vault.payInterest(msg.sender, interest);
+            emit Withdrawn(depositId, msg.sender, cert.principal, interest, false);
+        } else {
+            // Vault thiếu lãi: trả gốc đủ, trả lãi bao nhiêu có bấy nhiêu
+            if (vaultAvail > 0) vault.payInterest(msg.sender, vaultAvail);
+            emit InterestShortfall(depositId, msg.sender, cert.principal, interest, vaultAvail);
+            emit Withdrawn(depositId, msg.sender, cert.principal, vaultAvail, false);
+        }
+    }
+
+    /// @notice Withdraw before maturity — zero interest, penalty applied
+    /// @param depositId The NFT token ID
+    function earlyWithdraw(uint256 depositId) external whenNotPaused {
+        DepositCert storage cert = _requireActiveDeposit(depositId);
+        _requireOwner(depositId);
+
+        // Must be before maturity to count as early
+        require(block.timestamp < cert.maturityAt, "Use withdrawAtMaturity");
+
+        // Rate limit check
+        _checkWithdrawRateLimit(msg.sender, cert.principal);
+
+        uint256 penalty = (cert.principal * cert.penaltyBpsAtOpen) / BPS_DENOMINATOR;
+        uint256 userReceives = cert.principal - penalty;
+
+        cert.status = DepositStatus.Withdrawn;
+
+        // Update tracking (early withdraw: no interest owed)
+        uint256 interestWouldOwed = _calcInterest(cert.principal, cert.aprBpsAtOpen, cert.tenorDays * 1 days);
+        totalPrincipalLocked -= cert.principal;
+        if (totalInterestOwed >= interestWouldOwed)
+            totalInterestOwed -= interestWouldOwed;
+
+        // Return principal minus penalty — luôn thành công vì contract đang giữ tiền
+        token.safeTransfer(msg.sender, userReceives);
+
+        // Penalty: gửi thẳng đến feeReceiver, không qua vault
+        // Tránh bị block nếu vault đang paused hoặc feeReceiver có vấn đề
+        if (penalty > 0) {
+            address receiver = vault.feeReceiver();
+            token.safeTransfer(receiver, penalty);
+            emit PenaltyCollected(depositId, receiver, penalty);
+        }
+
+        emit Withdrawn(depositId, msg.sender, cert.principal, 0, true);
+    }
+
+    /// @notice Manually renew a matured deposit to a (possibly new) plan
+    /// @param depositId The NFT token ID of the matured deposit
+    /// @param newPlanId The plan to renew into
+    /// @return newDepositId The newly minted NFT token ID
+    function renewDeposit(uint256 depositId, uint256 newPlanId)
+        external
+        whenNotPaused
+        returns (uint256 newDepositId)
+    {
+        DepositCert storage cert = _requireActiveDeposit(depositId);
+        _requireOwner(depositId);
+
+        if (block.timestamp < cert.maturityAt)
+            revert DepositNotMatured(depositId, cert.maturityAt, block.timestamp);
+
+        SavingPlan storage newPlan = _requirePlanEnabled(newPlanId);
+
+        // Calculate interest earned on old deposit and compound into new principal
+        uint256 interest = _calcInterest(
+            cert.principal,
+            cert.aprBpsAtOpen,
+            cert.tenorDays * 1 days
+        );
+        uint256 newPrincipal = cert.principal + interest;
+
+        // Pay interest from vault (covers the compounding)
+        vault.payInterest(address(this), interest);
+
+        // Mark old deposit as renewed
+        cert.status = DepositStatus.ManualRenewed;
+
+        // Mint new deposit NFT
+        newDepositId = nextDepositId++;
+        uint256 newMaturityAt = block.timestamp + newPlan.tenorDays * 1 days;
+
+        deposits[newDepositId] = DepositCert({
+            planId:           newPlanId,
+            principal:        newPrincipal,
+            aprBpsAtOpen:     newPlan.aprBps,
+            penaltyBpsAtOpen: newPlan.earlyWithdrawPenaltyBps,
+            tenorDays:        newPlan.tenorDays,
+            startAt:          block.timestamp,
+            maturityAt:       newMaturityAt,
+            status:           DepositStatus.Active
+        });
+
+        _safeMint(msg.sender, newDepositId);
+
+        emit Renewed(depositId, newDepositId, newPrincipal, newPlanId);
+    }
+
+    /// @notice Trigger auto-renewal for a deposit whose grace period has expired.
+    ///         Called by an off-chain bot; anyone can call it.
+    /// @param depositId The NFT token ID
+    /// @return newDepositId The newly minted NFT token ID
+    function autoRenewDeposit(uint256 depositId)
+        external
+        whenNotPaused
+        returns (uint256 newDepositId)
+    {
+        DepositCert storage cert = _requireActiveDeposit(depositId);
+
+        uint256 gracePeriodEnd = cert.maturityAt + GRACE_PERIOD;
+        if (block.timestamp < gracePeriodEnd)
+            revert GracePeriodNotExpired(depositId, gracePeriodEnd, block.timestamp);
+
+        address owner = ownerOf(depositId);
+
+        // Interest uses the APR snapshotted at original open (protects user)
+        uint256 interest = _calcInterest(
+            cert.principal,
+            cert.aprBpsAtOpen,
+            cert.tenorDays * 1 days
+        );
+        uint256 newPrincipal = cert.principal + interest;
+
+        // Pay interest from vault into this contract (compounds into principal)
+        vault.payInterest(address(this), interest);
+
+        // Mark old deposit as auto-renewed
+        cert.status = DepositStatus.AutoRenewed;
+
+        // Mint new deposit — same tenor, APR locked to original
+        newDepositId = nextDepositId++;
+        uint256 newMaturityAt = block.timestamp + cert.tenorDays * 1 days;
+
+        deposits[newDepositId] = DepositCert({
+            planId:           cert.planId,
+            principal:        newPrincipal,
+            aprBpsAtOpen:     cert.aprBpsAtOpen,   // locked to original APR
+            penaltyBpsAtOpen: cert.penaltyBpsAtOpen,
+            tenorDays:        cert.tenorDays,
+            startAt:          block.timestamp,
+            maturityAt:       newMaturityAt,
+            status:           DepositStatus.Active
+        });
+
+        _safeMint(owner, newDepositId);
+
+        emit Renewed(depositId, newDepositId, newPrincipal, cert.planId);
+    }
+
+    // ─────────────────────── Views ───────────────────────
+
+    /// @notice Kiểm tra vault có đủ để trả lãi cho tất cả deposit không
+    /// @return sufficient  true nếu đủ
+    /// @return shortfall   số tiền thiếu (0 nếu đủ)
+    function vaultSolvencyCheck() external view returns (bool sufficient, uint256 shortfall) {
+        uint256 vaultBal = vault.vaultBalance();
+        if (vaultBal >= totalInterestOwed) {
+            return (true, 0);
+        }
+        return (false, totalInterestOwed - vaultBal);
+    }
+
+    /// @notice Tổng quan tài chính để Admin đối soát
+    function financialSummary() external view returns (
+        uint256 principalLocked,
+        uint256 interestOwed,
+        uint256 vaultBalance,
+        bool    isSolvent,
+        uint256 shortfall
+    ) {
+        principalLocked = totalPrincipalLocked;
+        interestOwed    = totalInterestOwed;
+        vaultBalance    = vault.vaultBalance();
+        isSolvent       = vaultBalance >= interestOwed;
+        shortfall       = isSolvent ? 0 : interestOwed - vaultBalance;
+    }
+
+    /// @notice Calculate the simple interest for a deposit
+    /// @param principal    Deposit amount (smallest unit)
+    /// @param aprBps       Annual rate in basis points
+    /// @param tenorSeconds Duration in seconds
+    function calcInterest(uint256 principal, uint256 aprBps, uint256 tenorSeconds)
+        external pure returns (uint256)
+    {
+        return _calcInterest(principal, aprBps, tenorSeconds);
+    }
+
+    /// @notice Get full details of a deposit certificate
+    function getDeposit(uint256 depositId) external view returns (DepositCert memory) {
+        return deposits[depositId];
+    }
+
+    /// @notice Get full details of a saving plan
+    function getPlan(uint256 planId) external view returns (SavingPlan memory) {
+        return plans[planId];
+    }
+
+    // ─────────────────────── Internal helpers ───────────────────────
+
+    /// @dev Kiểm tra rate limit và emit SecurityAlert nếu gần ngưỡng
+    function _checkWithdrawRateLimit(address user, uint256 amount) internal {
+        // Reset window mỗi 1 giờ
+        if (block.timestamp >= withdrawWindowStart + 1 hours) {
+            withdrawWindowStart    = block.timestamp;
+            withdrawCountLastHour  = 0;
+            withdrawAmountLastHour = 0;
+        }
+
+        withdrawCountLastHour++;
+        withdrawAmountLastHour += amount;
+
+        // Kiểm tra giới hạn số lần
+        if (maxWithdrawPerHour > 0 && withdrawCountLastHour > maxWithdrawPerHour) {
+            emit SecurityAlert("Withdraw rate limit exceeded", user, amount);
+            revert WithdrawRateLimitExceeded();
+        }
+
+        // Kiểm tra giới hạn tổng tiền
+        if (maxWithdrawAmountPerHour > 0 && withdrawAmountLastHour > maxWithdrawAmountPerHour) {
+            emit SecurityAlert("Withdraw amount limit exceeded", user, amount);
+            revert WithdrawAmountLimitExceeded();
+        }
+
+        // Cảnh báo sớm khi đạt 80% giới hạn (không revert, chỉ emit alert)
+        if (maxWithdrawPerHour > 0 && withdrawCountLastHour * 100 / maxWithdrawPerHour >= 80) {
+            emit SecurityAlert("Withdraw count approaching limit", user, withdrawCountLastHour);
+        }
+        if (maxWithdrawAmountPerHour > 0 && withdrawAmountLastHour * 100 / maxWithdrawAmountPerHour >= 80) {
+            emit SecurityAlert("Withdraw amount approaching limit", user, withdrawAmountLastHour);
+        }
+    }
+
+    /// @dev Simple interest: (principal * aprBps * tenorSeconds) / (SECONDS_PER_YEAR * BPS_DENOMINATOR)
+    function _calcInterest(
+        uint256 principal,
+        uint256 aprBps,
+        uint256 tenorSeconds
+    ) internal pure returns (uint256) {
+        return (principal * aprBps * tenorSeconds) / (SECONDS_PER_YEAR * BPS_DENOMINATOR);
+    }
+
+    function _requirePlanExists(uint256 planId) internal view {
+        if (planId >= nextPlanId) revert PlanNotFound(planId);
+    }
+
+    function _requirePlanEnabled(uint256 planId) internal view returns (SavingPlan storage plan) {
+        _requirePlanExists(planId);
+        plan = plans[planId];
+        if (!plan.enabled) revert PlanIsDisabled(planId);
+    }
+
+    function _requireActiveDeposit(uint256 depositId) internal view returns (DepositCert storage cert) {
+        cert = deposits[depositId];
+        if (cert.status != DepositStatus.Active) revert DepositNotActive(depositId);
+    }
+
+    function _requireOwner(uint256 depositId) internal view {
+        if (ownerOf(depositId) != msg.sender) revert NotDepositOwner(depositId, msg.sender);
+    }
+}
