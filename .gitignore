@@ -5,7 +5,7 @@ coverage/
 coverage.json
 typechain-types/
 
-# Quan trọng: không commit private key!
+
 .env
 
 # Frontend build
