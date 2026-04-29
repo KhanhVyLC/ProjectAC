@@ -38,7 +38,7 @@ ETHERSCAN_API_KEY=your_etherscan_api_key
 
 
 
-## Ngày 1 — Đọc hiểu phân tích yêu cầu nghiệp vụ + Set up Project + Smart Contract Cơ Bản
+## Ngày 1 — Đọc hiểu phân tích yêu cầu nghiệp vụ + Set up Project + Smart Contract cơ bản
 
 ### Mục tiêu
 3 file contract compile không lỗi, deploy được trên localhost và Sepolia
