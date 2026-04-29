@@ -65,18 +65,6 @@ contract SavingCore is ERC721, Ownable, Pausable {
     /// @notice Tổng lãi phải trả khi tất cả deposit đáo hạn (worst-case)
     uint256 public totalInterestOwed;
 
-    /// @notice Số lần withdraw trong vòng 1 giờ gần nhất (chống drain attack)
-    uint256 public withdrawCountLastHour;
-    uint256 public withdrawWindowStart;
-
-    /// @notice Giới hạn withdraw trong 1 giờ (admin set, 0 = không giới hạn)
-    uint256 public maxWithdrawPerHour;
-
-    /// @notice Tổng tiền rút ra trong 1 giờ gần nhất
-    uint256 public withdrawAmountLastHour;
-
-    /// @notice Giới hạn tổng tiền rút trong 1 giờ (0 = không giới hạn)  
-    uint256 public maxWithdrawAmountPerHour;
 
     // ─────────────────────── Events ───────────────────────
 
@@ -106,9 +94,6 @@ contract SavingCore is ERC721, Ownable, Pausable {
         uint256 indexed newPlanId
     );
 
-    /// @notice Phát ra khi phát hiện bất thường — Admin nên kiểm tra ngay
-    event SecurityAlert(string reason, address indexed triggeredBy, uint256 amount);
-
     /// @notice Phát ra khi penalty được chuyển đến feeReceiver
     event PenaltyCollected(uint256 indexed depositId, address indexed receiver, uint256 amount);
 
@@ -134,8 +119,7 @@ contract SavingCore is ERC721, Ownable, Pausable {
     error ZeroAmount();
     error InvalidApr();
     error VaultInsufficientForInterest(uint256 available, uint256 required);
-    error WithdrawRateLimitExceeded();
-    error WithdrawAmountLimitExceeded();
+
 
     // ─────────────────────── Constructor ───────────────────────
 
@@ -197,12 +181,6 @@ contract SavingCore is ERC721, Ownable, Pausable {
         _requirePlanExists(planId);
         plans[planId].enabled = false;
         emit PlanDisabled(planId);
-    }
-
-    /// @notice Đặt giới hạn số lần rút trong 1 giờ (0 = tắt giới hạn)
-    function setWithdrawRateLimit(uint256 maxCount, uint256 maxAmount) external onlyOwner {
-        maxWithdrawPerHour = maxCount;
-        maxWithdrawAmountPerHour = maxAmount;
     }
 
     /// @notice Admin kiểm tra tính toàn vẹn — nếu lệch thì có thể bị hack
@@ -283,9 +261,6 @@ contract SavingCore is ERC721, Ownable, Pausable {
         if (block.timestamp < cert.maturityAt)
             revert DepositNotMatured(depositId, cert.maturityAt, block.timestamp);
 
-        // Rate limit check
-        _checkWithdrawRateLimit(msg.sender, cert.principal);
-
         uint256 interest = _calcInterest(
             cert.principal,
             cert.aprBpsAtOpen,
@@ -322,9 +297,6 @@ contract SavingCore is ERC721, Ownable, Pausable {
 
         // Must be before maturity to count as early
         require(block.timestamp < cert.maturityAt, "Use withdrawAtMaturity");
-
-        // Rate limit check
-        _checkWithdrawRateLimit(msg.sender, cert.principal);
 
         uint256 penalty = (cert.principal * cert.penaltyBpsAtOpen) / BPS_DENOMINATOR;
         uint256 userReceives = cert.principal - penalty;
@@ -502,39 +474,6 @@ contract SavingCore is ERC721, Ownable, Pausable {
     }
 
     // ─────────────────────── Internal helpers ───────────────────────
-
-    /// @dev Kiểm tra rate limit và emit SecurityAlert nếu gần ngưỡng
-    function _checkWithdrawRateLimit(address user, uint256 amount) internal {
-        // Reset window mỗi 1 giờ
-        if (block.timestamp >= withdrawWindowStart + 1 hours) {
-            withdrawWindowStart    = block.timestamp;
-            withdrawCountLastHour  = 0;
-            withdrawAmountLastHour = 0;
-        }
-
-        withdrawCountLastHour++;
-        withdrawAmountLastHour += amount;
-
-        // Kiểm tra giới hạn số lần
-        if (maxWithdrawPerHour > 0 && withdrawCountLastHour > maxWithdrawPerHour) {
-            emit SecurityAlert("Withdraw rate limit exceeded", user, amount);
-            revert WithdrawRateLimitExceeded();
-        }
-
-        // Kiểm tra giới hạn tổng tiền
-        if (maxWithdrawAmountPerHour > 0 && withdrawAmountLastHour > maxWithdrawAmountPerHour) {
-            emit SecurityAlert("Withdraw amount limit exceeded", user, amount);
-            revert WithdrawAmountLimitExceeded();
-        }
-
-        // Cảnh báo sớm khi đạt 80% giới hạn (không revert, chỉ emit alert)
-        if (maxWithdrawPerHour > 0 && withdrawCountLastHour * 100 / maxWithdrawPerHour >= 80) {
-            emit SecurityAlert("Withdraw count approaching limit", user, withdrawCountLastHour);
-        }
-        if (maxWithdrawAmountPerHour > 0 && withdrawAmountLastHour * 100 / maxWithdrawAmountPerHour >= 80) {
-            emit SecurityAlert("Withdraw amount approaching limit", user, withdrawAmountLastHour);
-        }
-    }
 
     /// @dev Simple interest: (principal * aprBps * tenorSeconds) / (SECONDS_PER_YEAR * BPS_DENOMINATOR)
     function _calcInterest(
