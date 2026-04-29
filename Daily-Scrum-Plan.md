@@ -151,7 +151,7 @@ User approve → openDeposit → SavingCore giữ gốc
 
 ---
 
-## Ngày 2 — Hoàn thành logic gia hạn (smart contract SavingCore) + Viết test
+## Ngày 2 — Hoàn thành logic gia hạn (smart contract SavingCore.sol) + Viết test
 
 ### Mục tiêu
 Renew (thủ công + tự động) hoạt động đúng, test coverage >90%, Security Monitor hoạt động.
