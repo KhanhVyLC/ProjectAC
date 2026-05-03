@@ -151,104 +151,180 @@ User approve → openDeposit → SavingCore giữ gốc
 
 ---
 
-## Ngày 2 — Hoàn thành logic gia hạn (smart contract SavingCore.sol) + Viết test
+## Ngày 2 — Hoàn thành logic gia hạn SavingCore.sol + Viết test
 
 ### Mục tiêu
-Renew (thủ công + tự động) hoạt động đúng, test coverage >90%, Security Monitor hoạt động.
+Manual renew và auto renew đúng, test coverage >90%.
 
 ### Tasks
 
-#### Phần contract
-- [x] Viết `renewDeposit(depositId, newPlanId)`:
-  - Chỉ cho phép gọi sau `maturityAt`
-  - Tính lãi deposit cũ, cộng vào gốc → `newPrincipal`
-  - `vault.payInterest(address(this), interest)` để nhận lãi vào contract
-  - Đánh dấu deposit cũ `status = ManualRenewed`
-  - Mint NFT mới với plan mới (APR snapshot từ plan mới)
-  - Emit `Renewed(oldId, newId, newPrincipal, newPlanId)`
-- [x] Viết `autoRenewDeposit(depositId)`:
-  - Chỉ cho phép gọi sau `maturityAt + 3 days` (grace period)
-  - **Giữ nguyên `aprBpsAtOpen` cũ** — không dùng APR hiện tại của plan
-  - Giữ nguyên tenor, planId
-  - Mint NFT mới cho owner cũ
-  - Đánh dấu deposit cũ `status = AutoRenewed`
-  - Bất kỳ địa chỉ nào cũng gọi được (bot off-chain trigger)
-- [x] Thêm `pause()` / `unpause()` vào SavingCore (chặn tất cả user action)
-- [x] Kiểm tra `whenNotPaused` đủ ở: openDeposit, withdrawAtMaturity, earlyWithdraw, renewDeposit, autoRenewDeposit
+#### SavingCore.sol — Renew functions
+- [x] `renewDeposit(depositId, newPlanId)` — whenNotPaused:
+  - Active, ownerOf, timestamp >= maturityAt, newPlan enabled
+  - Tính interest, vault.payInterest(address(this), interest)
+  - newPrincipal = oldPrincipal + interest
+  - Status cũ = ManualRenewed
+  - Mint NFT mới với APR snapshot từ newPlan hiện tại
+  - Emit Renewed
+- [x] `autoRenewDeposit(depositId)` — whenNotPaused, **bất kỳ ai gọi được**:
+  - Active, timestamp >= maturityAt + GRACE_PERIOD
+  - Tính interest với `cert.aprBpsAtOpen CŨ` (bảo vệ user)
+  - vault.payInterest(address(this), interest)
+  - newPrincipal = oldPrincipal + interest
+  - Status cũ = AutoRenewed
+  - Mint NFT mới cho owner cũ — cùng planId, tenorDays, APR CŨ
+  - Emit Renewed
 
-#### Phần test
-- [x] Test `createPlan`: plan hợp lệ, APR = 0 revert, non-owner revert
-- [x] Test `updatePlan` / `enablePlan` / `disablePlan`: emit event đúng, chỉ ảnh hưởng deposit mới
-- [x] Test `openDeposit`: happy path, dưới min revert, trên max revert, plan disabled revert, snapshot APR đúng
-- [x] Test `withdrawAtMaturity`: lãi đúng công thức, rút trước maturity revert, rút 2 lần revert, vault thiếu → graceful shortfall (emit InterestShortfall, vẫn nhận gốc)
-- [x] Test `earlyWithdraw`: penalty đúng = principal × penaltyBps / 10000, lãi = 0, penalty đến feeReceiver, rút sau maturity revert
-- [x] Test `renewDeposit`: newPrincipal = old + interest, status ManualRenewed, plan mới APR đúng, trước maturity revert
-- [x] Test `autoRenewDeposit`: trước grace period revert, sau grace period pass, APR lock (admin hạ APR nhưng deposit vẫn giữ APR cũ), NFT thuộc owner cũ
-- [x] Test Vault: fundVault tăng balance, withdrawVault giảm balance, rút quá balance revert
-- [x] Test Pause: openDeposit / withdrawAtMaturity / earlyWithdraw / renewDeposit bị chặn khi paused, unpause hoạt động lại
-- [x] Test integrityCheck: trả về intact=true khi đúng, intact=false khi bị drain
-- [x] Test vaultSolvencyCheck: sufficient=true khi đủ, sufficient=false + shortfall đúng khi thiếu
-- [x] Test InterestShortfall: vault = 0 → emit event, user vẫn nhận đủ gốc
-- [x] Test PenaltyCollected: earlyWithdraw emit event với đúng receiver và amount
-- [x] Chạy `npx hardhat coverage` — đạt >90%
+#### scripts/autoRenewBot.js
+- [x] Chạy batch job lúc BATCH_HOUR:BATCH_MINUTE mỗi ngày (default 0h00)
+- [x] Quét tất cả DepositOpened events, phân loại: cần renew / chưa đủ / inactive
+- [x] Gọi autoRenewDeposit() cho từng deposit đủ điều kiện
+- [x] Log chi tiết: depositId, owner, principal, APR, tx hash
+- [x] Lịch sử 1 ngày, countdown đến batch tiếp theo
+- [x] 1 deposit fail không dừng cả batch
+- [x] Chạy bằng: `npm run bot:sepolia`
+
+#### Test — SavingSystem.test.js (>90% coverage)
+- [x] **createPlan**: hợp lệ, APR=0 revert, non-owner revert, emit event
+- [x] **updatePlan/enable/disable**: emit event, snapshot không đổi
+- [x] **openDeposit**: happy path, dưới min, trên max, disabled, zero amount, APR snapshot đúng
+- [x] **withdrawAtMaturity**: lãi đúng công thức, trước maturity revert, 2 lần revert, non-owner revert, vault thiếu → graceful + emit InterestShortfall
+- [x] **earlyWithdraw**: penalty đúng, lãi=0, penalty → feeReceiver, sau maturity revert, 2 lần revert
+- [x] **renewDeposit**: newPrincipal đúng, ManualRenewed, APR mới đúng, trước maturity revert, plan disabled revert
+- [x] **autoRenewDeposit**: trước grace revert, sau grace pass, APR lock, NFT → owner cũ, emit Renewed
+- [x] **Vault**: fundVault, withdrawVault, rút quá revert, non-owner revert
+- [x] **Pause**: tất cả user action bị chặn, unpause hoạt động, vault pause blocks payInterest
+- [x] **integrityCheck**: intact=true khi đúng, intact=false khi bị drain (impersonateAccount)
+- [x] **vaultSolvencyCheck**: sufficient=true/false, shortfall đúng
+- [x] **financialSummary**: principalLocked, interestOwed, isSolvent đúng
+- [x] **InterestShortfall**: vault=0 → emit event + nhận đủ gốc
+- [x] **PenaltyCollected**: emit đúng receiver + amount
+- [x] **totalPrincipalLocked**: tăng khi open, giảm khi withdraw
+- [x] **Interest math**: Alice ~6.16 USDC, precision cho số nhỏ
+- [x] **Full security flow**: integrity fail → pause → user bị chặn → unpause
+- [x] `npx hardhat coverage` → **>90%**
 
 ### Lưu ý quan trọng
-> Test chạy trên hardhat network (localhost) — không cần Infura, không tốn ETH.
 
-> Dùng `time.increaseTo(timestamp)` hoặc `time.increase(seconds)` từ `@nomicfoundation/hardhat-network-helpers`.
-
-> **APR lock là điểm dễ sai nhất**: test case phải thực hiện `updatePlan` hạ APR TRƯỚC khi `autoRenewDeposit`, sau đó verify `newCert.aprBpsAtOpen === originalApr`.
-
-> `autoRenewDeposit` không cần `onlyOwner` — bất kỳ ai cũng gọi được sau grace period.
-
-> Công thức: `GRACE_PERIOD = 3 days = 259200 seconds` — fast-forward `maturityAt + 259201` để qua grace period.
+> **APR lock**: gọi `updatePlan` hạ APR TRƯỚC `autoRenewDeposit`, verify `newCert.aprBpsAtOpen === originalApr`.
 
 ---
-## Ngày 3 — Frontend
+## Ngày 3 — Frontend React
 
 ### Mục tiêu
-React app kết nối MetaMask trên Sepolia, đủ các chức năng
+React app kết nối MetaMask Sepolia, đủ chức năng Depositor + Admin, giao diện hoàn chỉnh.
 
 ### Tasks
--  Tạo React app (Vite), cài ethers.js, import ABI từ `artifacts/`
--  Cấu hình MetaMask trỏ vào Sepolia testnet
--  Lưu địa chỉ contract đã deploy vào file config (không hardcode trong component)
--  Component `ConnectWallet` — kết nối MetaMask, hiển thị địa chỉ ví
--  Component `PlanList` — hiển thị danh sách saving plans (tenor, APR, min/max)
--  Component `OpenDeposit` — form nhập plan + số tiền, gọi `approve` rồi mới gọi `openDeposit`
--  Component `MyDeposits` — hiển thị NFT deposits của user (status, số tiền, ngày đáo hạn)
--  Nút Rút tiền — tự chọn đúng hạn (`withdrawAtMaturity`) hoặc sớm hạn (`earlyWithdraw`)
--  Nút Gia hạn — chọn plan mới, gọi `renewDeposit`
--  Test toàn bộ flow trên Sepolia với MetaMask
 
+#### Setup
+- [x] `npm create vite@latest frontend -- --template react`
+- [x] `cd frontend && npm install ethers`
+- [x] Tạo `frontend/src/contracts.js` — địa chỉ 3 contract + ABI đầy đủ
+- [x] Đặt file PNG icon vào `frontend/public/`
 
+#### contracts.js — ABI cần có đủ
+```js
+// ERC20_ABI: balanceOf, approve, allowance, decimals
+// VAULT_ABI: vaultBalance, feeReceiver, fundVault, withdrawVault,
+//            setFeeReceiver, pause, unpause, paused, owner
+// CORE_ABI:  nextPlanId, nextDepositId, getPlan, getDeposit, ownerOf, calcInterest,
+//            openDeposit, withdrawAtMaturity, earlyWithdraw,
+//            renewDeposit, autoRenewDeposit,
+//            createPlan, updatePlan, enablePlan, disablePlan,
+//            pause, unpause, paused, owner,
+//            integrityCheck, financialSummary, vaultSolvencyCheck,
+//            totalPrincipalLocked, totalInterestOwed,
+//            events: DepositOpened, Withdrawn, Renewed, InterestShortfall
+```
+
+#### Chức năng Depositor
+- [x] Connect/Disconnect wallet — đầy đủ địa chỉ (monospace)
+- [x] Tab Saving Plans — load qua nextPlanId, tenor/APR/min/max/penalty, nút Mở Deposit
+- [x] Modal Mở Deposit — nhập số tiền, lãi dự kiến, approve → openDeposit
+- [x] Tab My Deposits — load qua event filter `DepositOpened(null, account)`
+- [x] Nút theo trạng thái deposit:
+  - Trước maturity:  Rút sớm (confirm dialog thông báo penalty)
+  - Trong grace period (0-3 ngày):  Rút + Lãi,  Gia hạn thủ công
+  - Sau grace period (>3 ngày):  Rút + Lãi,  Trigger Auto Renew
+- [x] Modal Gia hạn — chọn plan mới từ danh sách enabled
+- [x] Confirm Auto Renew — dialog thông báo APR cũ được giữ
+- [x] Khi paused — tất cả nút disable, banner đỏ "⏸ Hệ thống đang tạm dừng"
+- [x] Auto reload khi đổi account MetaMask
+- [x] Poll pause state mỗi 5 giây
+
+#### Chức năng Admin
+- [x] Badge ADMIN vàng + badge ⏸ PAUSED đỏ ở header
+- [x] Tab Admin — menu 9 card (1 màu border, icon PNG màu trắng):
+  -  Tạo Plan mới → createPlan
+  -  Cập nhật APR → updatePlan
+  -  Bật/Tắt Plan → enable/disablePlan + bảng danh sách
+  -  Quản lý Vault → fundVault/withdrawVault + dashboard đối soát
+  -  Fee Receiver → setFeeReceiver
+  -  Pause System → pause/unpause + trạng thái real-time
+  -  Phát USDC → mint cho địa chỉ bất kỳ + mint cho chính mình + lịch sử
+  -  Xem Plans → bảng tất cả plans
+  -  Security Monitor → integrity check + vault solvency + refresh
+- [x] Vault Dashboard — coverage % (progress bar xanh/đỏ), cảnh báo thiếu lãi
+- [x] Security Monitor — so sánh actual vs sổ sách, cảnh báo đỏ nếu lệch
+
+#### UX & Kỹ thuật
+- [x] **Fix input mất focus** — định nghĩa AField, AdminCard, AdminPanel, VaultSolvency, SecurityMonitor **bên ngoài** AdminTab, không lồng function
+- [x] **ethers v6** — dùng index `p[0]`, `p[1]` đọc struct, không dùng named fields
+- [x] **Load deposits qua events** — `core.filters.DepositOpened(null, account)`
+- [x] **Toast notifications** — thành công xanh / thất bại đỏ, tự mất sau 4.5s
+- [x] **Error messages tiếng Việt** — decode custom errors rõ ràng
+- [x] **Icon PNG trắng** — `filter: "brightness(0) invert(1)"`
+- [x] **isPaused** — `Promise.all([vault.paused(), core.paused()])`, setIsPaused instant khi pause/unpause
+
+### Lưu ý quan trọng
+> Phải gọi `approve` và chờ tx confirm trước `openDeposit`.
 
 ---
 
-## Ngày 4 — Hoàn thiện + Demo + Nộp bài
+## Ngày 4 — Hoàn thiện + Test Sepolia + Nộp bài
 
 ### Mục tiêu
-Đủ tài liệu, repo, sẵn sàng nộp
+Toàn bộ flow hoạt động trên Sepolia, đủ tài liệu, video demo, sẵn sàng nộp.
 
 ### Tasks
--  Fix bug còn lại nếu có
--  Thêm NatSpec comments vào các hàm chính (`/// @notice`, `@param`, `@return`)
--  Viết `README.md` gồm: cách cài, chạy test, deploy Sepolia, link contract trên Etherscan, cách chạy frontend
--  Kiểm tra `.gitignore` có đủ: `.env`, `node_modules/`, `artifacts/`, `cache/`, `coverage/`
--  Quay video demo 3–5 phút: kết nối ví → xem plan → gửi tiền → rút / gia hạn
--  Push lên GitHub, để repo public
--  Clone lại từ đầu, chạy thử để đảm bảo không thiếu file
 
+#### Test flow trên Sepolia
+- [ ] Admin: kết nối ví → badge ADMIN hiện
+- [ ] Admin: tạo plan → fund vault → mint USDC cho depositor
+- [ ] Depositor: kết nối ví → thấy USDC → mở deposit → thấy NFT trong My Deposits
+- [ ] Admin: pause → depositor bị chặn → unpause → hoạt động bình thường
+- [ ] Security Monitor: integrity check đúng số liệu, vault solvency đúng
+- [ ] Bot: `npm run bot:sepolia` → kết nối, in log, countdown đúng
 
----
+#### NatSpec comments
+- [ ] `/// @notice` cho tất cả hàm public/external
+- [ ] `/// @param` cho tham số quan trọng
+- [ ] `/// @return` cho hàm view
+- [ ] `/// @dev` cho công thức lãi, grace period
 
-## Checklist Nộp Bài
+#### README.md
+- [ ] Giới thiệu dự án
+- [ ] Kiến trúc: MockUSDC / VaultManager / SavingCore
+- [ ] Cài + test + deploy Sepolia
+- [ ] **Địa chỉ 3 contract + link Etherscan**
+- [ ] Chạy frontend + bot
 
--  GitHub repo public
--  Đủ 3 file contract: `MockUSDC.sol`, `VaultManager.sol`, `SavingCore.sol`
--  Contract đã verify trên Sepolia Etherscan
--  Test coverage >90%
--  Frontend chạy được, kết nối Sepolia
--  `README.md` có link contract Etherscan
--  Video demo 3–5 phút
--  `.env` không bị push lên GitHub
+#### Kiểm tra repo
+- [ ] `git status` — `.env` KHÔNG xuất hiện
+- [ ] Không có private key trong code
+- [ ] `.gitignore` đầy đủ
+
+#### GitHub
+- [ ] Tạo repo public, push code
+- [ ] Clone lại thư mục khác, chạy thử từng bước README
+- [ ] Repo hiển thị đúng trên GitHub
+
+#### Video demo (3-5 phút)
+- [ ] Giới thiệu kiến trúc (30s)
+- [ ] Admin: tạo plan → fund vault → mint USDC
+- [ ] Depositor: kết nối → xem plan → mở deposit
+- [ ] Demo rút đúng hạn (Hardhat local để tua thời gian)
+- [ ] Demo rút sớm (hiện penalty)
+- [ ] Demo gia hạn thủ công + auto renew
+- [ ] Demo Pause → bị chặn → Unpause
+- [ ] Security Monitor: integrity check
