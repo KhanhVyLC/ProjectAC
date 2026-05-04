@@ -212,8 +212,8 @@ describe("withdrawAtMaturity", function () {
     await expect(core.connect(alice).withdrawAtMaturity(0)).to.be.reverted;
   });
 
-  it("reverts if vault has insufficient funds", async () => {
-    const { core, vault, owner, alice } = await deployAll();
+  it("vault thiếu lãi: vẫn trả gốc đủ, emit InterestShortfall (không revert)", async () => {
+    const { core, vault, usdc, owner, alice } = await deployAll();
     await core.connect(alice).openDeposit(0, USDC(1000));
     const cert = await core.getDeposit(0);
     await time.increaseTo(Number(cert.maturityAt));
@@ -222,7 +222,15 @@ describe("withdrawAtMaturity", function () {
     const vBal = await vault.vaultBalance();
     await vault.connect(owner).withdrawVault(vBal);
 
-    await expect(core.connect(alice).withdrawAtMaturity(0)).to.be.reverted;
+    const balBefore = await usdc.balanceOf(alice.address);
+    // Không revert — graceful shortfall
+    const tx = await core.connect(alice).withdrawAtMaturity(0);
+    const balAfter = await usdc.balanceOf(alice.address);
+
+    // Alice vẫn nhận đủ gốc
+    expect(balAfter - balBefore).to.equal(USDC(1000));
+    // Emit InterestShortfall thay vì revert
+    await expect(tx).to.emit(core, "InterestShortfall");
   });
 
   it("reverts if caller is not the deposit owner", async () => {
@@ -486,5 +494,204 @@ describe("Interest math", function () {
     // 1 USDC for 7 days at 1% APR — should not round to zero
     const result = await core.calcInterest(USDC(1), 100, 7n * 86400n);
     expect(result).to.be.gt(0n);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+describe("Security Monitor", function () {
+
+  // ── Cách 1: Integrity Check ─────────────────────────────────────────────
+  describe("integrityCheck", function () {
+    it("returns intact=true khi số dư khớp sổ sách", async () => {
+      const { core, alice } = await deployAll();
+      await core.connect(alice).openDeposit(0, USDC(1000));
+      const [isIntact, actual, expected, diff] = await core.integrityCheck();
+      expect(isIntact).to.be.true;
+      expect(actual).to.equal(expected);
+      expect(diff).to.equal(0n);
+    });
+
+    it("phát hiện mất tiền khi số dư không khớp", async () => {
+      const { core, usdc, alice } = await deployAll();
+      await core.connect(alice).openDeposit(0, USDC(1000));
+
+      // --- Giả lập hack: force-transfer token ra khỏi contract ---
+      // Trong test dùng cách: impersonate contract address
+      const coreAddr = await core.getAddress();
+      await ethers.provider.send("hardhat_setBalance", [coreAddr, "0xde0b6b3a7640000"]);
+      await ethers.provider.send("hardhat_impersonateAccount", [coreAddr]);
+      const coreSigner = await ethers.getSigner(coreAddr);
+      // Chuyển 500 USDC ra ngoài (hack simulation)
+      await usdc.connect(coreSigner).transfer(alice.address, USDC(500));
+      await ethers.provider.send("hardhat_stopImpersonatingAccount", [coreAddr]);
+      // -----------------------------------------------------------
+
+      const [isIntact, actual, expected, diff] = await core.integrityCheck();
+      expect(isIntact).to.be.false;
+      expect(diff).to.equal(USDC(500));
+      console.log(`      🚨 Phát hiện thiếu: ${diff / 1_000_000n} USDC`);
+    });
+  });
+
+
+
+  // ── Cách 2: Shortfall khi Vault thiếu tiền ──────────────────────────────
+  describe("InterestShortfall", function () {
+    it("emit InterestShortfall khi vault thiếu lãi nhưng vẫn trả gốc đủ", async () => {
+      const { core, vault, usdc, owner, alice } = await deployAll();
+      await core.connect(alice).openDeposit(0, USDC(1000));
+      const cert = await core.getDeposit(0);
+      await time.increaseTo(Number(cert.maturityAt));
+
+      // Drain vault về 0
+      const bal = await vault.vaultBalance();
+      await vault.connect(owner).withdrawVault(bal);
+
+      const balBefore = await usdc.balanceOf(alice.address);
+      await expect(core.connect(alice).withdrawAtMaturity(0))
+        .to.emit(core, "InterestShortfall");
+
+      // Alice vẫn nhận được gốc 1000 USDC
+      const balAfter = await usdc.balanceOf(alice.address);
+      expect(balAfter - balBefore).to.equal(USDC(1000));
+      console.log("      ✅ Alice nhận đủ gốc dù vault thiếu lãi");
+    });
+  });
+
+  // ── Cách 3: vaultSolvencyCheck ───────────────────────────────────────────
+  describe("vaultSolvencyCheck", function () {
+    it("trả về sufficient=true khi vault đủ", async () => {
+      const { core, alice } = await deployAll();
+      await core.connect(alice).openDeposit(0, USDC(1000));
+      const [sufficient, shortfall] = await core.vaultSolvencyCheck();
+      expect(sufficient).to.be.true;
+      expect(shortfall).to.equal(0n);
+    });
+
+    it("trả về sufficient=false và đúng shortfall khi vault thiếu", async () => {
+      const { core, vault, owner, alice } = await deployAll();
+      await core.connect(alice).openDeposit(0, USDC(1000));
+
+      // Lấy interestOwed từ financialSummary
+      const summary = await core.financialSummary();
+      const interestOwed = summary[1]; // totalInterestOwed
+
+      // Drain toàn bộ vault
+      const bal = await vault.vaultBalance();
+      await vault.connect(owner).withdrawVault(bal);
+
+      // Sau khi drain: shortfall = interestOwed
+      const [sufficient, shortfall] = await core.vaultSolvencyCheck();
+      expect(sufficient).to.be.false;
+      expect(shortfall).to.equal(interestOwed);
+      console.log(`      ✅ Vault thiếu: ${shortfall / 1_000_000n} USDC`);
+    });
+  });
+
+  // ── Cách 4: Demo flow đầy đủ ─────────────────────────────────────────────
+  describe("Full security demo flow", function () {
+    it("phát hiện bất thường → admin pause → user không rút được → unpause", async () => {
+      const { core, usdc, owner, alice } = await deployAll();
+      await core.connect(alice).openDeposit(0, USDC(1000));
+
+      // Bước 1: Integrity check ban đầu OK
+      let [isIntact] = await core.integrityCheck();
+      expect(isIntact).to.be.true;
+      console.log("      Step 1: ✅ Integrity OK");
+
+      // Bước 2: Giả lập hack (force-drain)
+      const coreAddr = await core.getAddress();
+      await ethers.provider.send("hardhat_setBalance", [coreAddr, "0xde0b6b3a7640000"]);
+      await ethers.provider.send("hardhat_impersonateAccount", [coreAddr]);
+      const coreSigner = await ethers.getSigner(coreAddr);
+      await usdc.connect(coreSigner).transfer(alice.address, USDC(500));
+      await ethers.provider.send("hardhat_stopImpersonatingAccount", [coreAddr]);
+
+      // Bước 3: Admin phát hiện bất thường
+      [isIntact] = await core.integrityCheck();
+      expect(isIntact).to.be.false;
+      console.log("      Step 2: 🚨 Phát hiện mất 500 USDC!");
+
+      // Bước 4: Admin pause khẩn cấp
+      await core.connect(owner).pause();
+      console.log("      Step 3: ⏸ Admin đã Pause hệ thống");
+
+      // Bước 5: User không rút được
+      const cert = await core.getDeposit(0);
+      await time.increaseTo(Number(cert.maturityAt));
+      await expect(core.connect(alice).withdrawAtMaturity(0)).to.be.reverted;
+      console.log("      Step 4: ✅ User bị chặn khi hệ thống paused");
+
+      // Bước 6: Admin fix xong, unpause
+      await core.connect(owner).unpause();
+      console.log("      Step 5: ▶ Admin Unpause sau khi xử lý xong");
+
+      console.log("      ✅ Full security flow hoàn thành");
+    });
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+describe("Tính năng mới", function () {
+
+  // 1. PenaltyCollected event
+  it("earlyWithdraw: emit PenaltyCollected với đúng receiver và amount", async () => {
+    const { core, alice, feeReceiver } = await deployAll();
+    await core.connect(alice).openDeposit(0, USDC(1000));
+
+    const expectedPenalty = USDC(1000) * 500n / 10000n; // 5%
+    await expect(core.connect(alice).earlyWithdraw(0))
+      .to.emit(core, "PenaltyCollected")
+      .withArgs(0, feeReceiver.address, expectedPenalty);
+  });
+
+  // 2. totalPrincipalLocked tracking
+  it("totalPrincipalLocked tăng khi openDeposit, giảm khi withdraw", async () => {
+    const { core, alice } = await deployAll();
+
+    expect(await core.totalPrincipalLocked()).to.equal(0n);
+
+    await core.connect(alice).openDeposit(0, USDC(1000));
+    expect(await core.totalPrincipalLocked()).to.equal(USDC(1000));
+
+    const cert = await core.getDeposit(0);
+    await time.increaseTo(Number(cert.maturityAt));
+    await core.connect(alice).withdrawAtMaturity(0);
+    expect(await core.totalPrincipalLocked()).to.equal(0n);
+  });
+
+  // 3. financialSummary
+  it("financialSummary trả về đúng số liệu", async () => {
+    const { core, alice } = await deployAll();
+    await core.connect(alice).openDeposit(0, USDC(1000));
+
+    const [principal, interestOwed, vaultBalance, isSolvent] =
+      await core.financialSummary();
+
+    expect(principal).to.equal(USDC(1000));
+    expect(interestOwed).to.be.gt(0n);
+    expect(vaultBalance).to.be.gt(0n);
+    expect(isSolvent).to.be.true;
+  });
+
+  // 4. Vault thiếu lãi: withdrawAtMaturity vẫn trả đủ gốc
+  it("withdrawAtMaturity: trả đủ gốc khi vault = 0, emit InterestShortfall", async () => {
+    const { core, vault, usdc, owner, alice } = await deployAll();
+    await core.connect(alice).openDeposit(0, USDC(1000));
+
+    const cert = await core.getDeposit(0);
+    await time.increaseTo(Number(cert.maturityAt));
+
+    // Drain vault
+    await vault.connect(owner).withdrawVault(await vault.vaultBalance());
+
+    const balBefore = await usdc.balanceOf(alice.address);
+    const tx = await core.connect(alice).withdrawAtMaturity(0);
+    const balAfter = await usdc.balanceOf(alice.address);
+
+    // Nhận đủ gốc
+    expect(balAfter - balBefore).to.equal(USDC(1000));
+    // Emit InterestShortfall
+    await expect(tx).to.emit(core, "InterestShortfall");
   });
 });
