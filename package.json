@@ -1,0 +1,42 @@
+{
+  "name": "blockchain-saving",
+  "version": "1.0.0",
+  "description": "Blockchain-based term deposit system",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "coverage": "hardhat coverage",
+    "node": "hardhat node",
+    "deploy:local": "hardhat run deploy/deploy.ts --network localhost",
+    "deploy:sepolia": "hardhat run deploy/deploy.ts --network sepolia",
+    "bot:local": "ts-node scripts/autoRenewBot.ts --network localhost",
+    "bot:sepolia": "ts-node scripts/autoRenewBot.ts --network sepolia",
+    "time:maturity": "hardhat run scripts/timeTravel.ts --network localhost -- --maturity",
+    "time:grace": "hardhat run scripts/timeTravel.ts --network localhost -- --grace",
+    "time:days": "hardhat run scripts/timeTravel.ts --network localhost -- --days"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-chai-matchers": "^2.0.0",
+    "@nomicfoundation/hardhat-ethers": "^3.0.0",
+    "@nomicfoundation/hardhat-network-helpers": "^1.0.0",
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@nomicfoundation/hardhat-verify": "^2.0.0",
+    "@typechain/ethers-v6": "^0.5.0",
+    "@typechain/hardhat": "^9.0.0",
+    "@types/chai": "^4.2.0",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^25.6.0",
+    "chai": "^4.2.0",
+    "dotenv": "^16.4.0",
+    "ethers": "^6.13.0",
+    "hardhat": "^2.22.0",
+    "hardhat-gas-reporter": "^1.0.8",
+    "solidity-coverage": "^0.8.1",
+    "ts-node": "^10.9.2",
+    "typechain": "^8.3.0",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.0"
+  }
+}
