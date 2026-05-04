@@ -19,7 +19,10 @@ contract SavingCore is ERC721, Ownable, Pausable {
 
     uint256 public constant SECONDS_PER_YEAR = 365 * 24 * 3600;
     uint256 public constant BPS_DENOMINATOR   = 10_000;
-    uint256 public constant GRACE_PERIOD      = 3 days;
+    uint256 public constant GRACE_PERIOD_DEFAULT = 3 days;
+
+    /// @notice Grace period có thể thay đổi bởi Admin (default 3 ngày)
+    uint256 public gracePeriod = GRACE_PERIOD_DEFAULT;
 
     // ─────────────────────── Types ───────────────────────
 
@@ -28,7 +31,7 @@ contract SavingCore is ERC721, Ownable, Pausable {
 
     /// @notice A saving plan created by the admin
     struct SavingPlan {
-        uint256 tenorDays;
+        uint256 tenorSeconds; ///< Kỳ hạn tính bằng giây (hỗ trợ cả giờ và ngày)
         uint256 aprBps;           // Annual Percentage Rate in basis points
         uint256 minDeposit;       // 0 = no minimum
         uint256 maxDeposit;       // 0 = no maximum
@@ -42,7 +45,7 @@ contract SavingCore is ERC721, Ownable, Pausable {
         uint256 principal;        // tokens locked (smallest unit)
         uint256 aprBpsAtOpen;     // snapshot of APR at open time
         uint256 penaltyBpsAtOpen; // snapshot of penalty at open time
-        uint256 tenorDays;        // snapshot of tenor at open time
+        uint256 tenorSeconds;     // snapshot of tenor at open time (giây)
         uint256 startAt;
         uint256 maturityAt;
         DepositStatus status;
@@ -68,7 +71,7 @@ contract SavingCore is ERC721, Ownable, Pausable {
 
     // ─────────────────────── Events ───────────────────────
 
-    event PlanCreated(uint256 indexed planId, uint256 tenorDays, uint256 aprBps);
+    event PlanCreated(uint256 indexed planId, uint256 tenorSeconds, uint256 aprBps);
     event PlanUpdated(uint256 indexed planId, uint256 newAprBps);
     event PlanEnabled(uint256 indexed planId);
     event PlanDisabled(uint256 indexed planId);
@@ -93,6 +96,9 @@ contract SavingCore is ERC721, Ownable, Pausable {
         uint256 newPrincipal,
         uint256 indexed newPlanId
     );
+
+    /// @notice Phát ra khi Admin thay đổi grace period
+    event GracePeriodUpdated(uint256 newGracePeriod);
 
     /// @notice Phát ra khi penalty được chuyển đến feeReceiver
     event PenaltyCollected(uint256 indexed depositId, address indexed receiver, uint256 amount);
@@ -136,13 +142,13 @@ contract SavingCore is ERC721, Ownable, Pausable {
     // ─────────────────────── Admin ───────────────────────
 
     /// @notice Create a new saving plan
-    /// @param tenorDays                Length of deposit in days
+    /// @param tenorSeconds             Kỳ hạn tính bằng giây (ví dụ: 3600=1h, 86400=1d, 604800=7d)
     /// @param aprBps                   Annual rate in basis points (e.g. 250 = 2.5%)
     /// @param minDeposit               Minimum deposit amount (0 = none)
     /// @param maxDeposit               Maximum deposit amount (0 = none)
     /// @param earlyWithdrawPenaltyBps  Penalty in bps for early withdrawal
     function createPlan(
-        uint256 tenorDays,
+        uint256 tenorSeconds,
         uint256 aprBps,
         uint256 minDeposit,
         uint256 maxDeposit,
@@ -151,14 +157,14 @@ contract SavingCore is ERC721, Ownable, Pausable {
         if (aprBps == 0) revert InvalidApr();
         uint256 planId = nextPlanId++;
         plans[planId] = SavingPlan({
-            tenorDays:               tenorDays,
+            tenorSeconds:            tenorSeconds,
             aprBps:                  aprBps,
             minDeposit:              minDeposit,
             maxDeposit:              maxDeposit,
             earlyWithdrawPenaltyBps: earlyWithdrawPenaltyBps,
             enabled:                 true
         });
-        emit PlanCreated(planId, tenorDays, aprBps);
+        emit PlanCreated(planId, tenorSeconds, aprBps);
     }
 
     /// @notice Update the APR of an existing plan (does not affect open deposits)
@@ -183,11 +189,17 @@ contract SavingCore is ERC721, Ownable, Pausable {
         emit PlanDisabled(planId);
     }
 
-    /// @notice Admin kiểm tra tính toàn vẹn — nếu lệch thì có thể bị hack
-    /// @return isIntact  true nếu số dư khớp với sổ sách
-    /// @return actual    số dư thực tế trong contract
-    /// @return expected  số dư theo sổ sách (totalPrincipalLocked)
-    /// @return diff      chênh lệch (nếu > 0 nghĩa là thiếu tiền)
+    /// @notice Admin thay đổi grace period (min 1 giờ, max 30 ngày)
+    /// @param newGracePeriod Thời gian tính bằng giây (ví dụ: 10000, 86400, 259200)
+    function setGracePeriod(uint256 newGracePeriod) external onlyOwner {
+        require(newGracePeriod > 0,        "Grace period phai lon hon 0");
+        require(newGracePeriod <= 30 days, "Grace period qua dai");
+        gracePeriod = newGracePeriod;
+        emit GracePeriodUpdated(newGracePeriod);
+    }
+
+    /// @notice Admin kiểm tra tính toàn vẹn — actual vs sổ sách
+    /// @dev Nếu actual < expected thì có thể đã bị hack
     function integrityCheck() external view returns (
         bool isIntact,
         uint256 actual,
@@ -229,21 +241,21 @@ contract SavingCore is ERC721, Ownable, Pausable {
 
         // Snapshot plan details and mint NFT
         depositId = nextDepositId++;
-        uint256 maturityAt = block.timestamp + plan.tenorDays * 1 days;
+        uint256 maturityAt = block.timestamp + plan.tenorSeconds;
 
         deposits[depositId] = DepositCert({
             planId:           planId,
             principal:        amount,
             aprBpsAtOpen:     plan.aprBps,
             penaltyBpsAtOpen: plan.earlyWithdrawPenaltyBps,
-            tenorDays:        plan.tenorDays,
+            tenorSeconds:     plan.tenorSeconds,
             startAt:          block.timestamp,
             maturityAt:       maturityAt,
             status:           DepositStatus.Active
         });
 
         // Track totals for reconciliation
-        uint256 interestOwed = _calcInterest(amount, plan.aprBps, plan.tenorDays * 1 days);
+        uint256 interestOwed = _calcInterest(amount, plan.aprBps, plan.tenorSeconds);
         totalPrincipalLocked += amount;
         totalInterestOwed    += interestOwed;
 
@@ -264,7 +276,7 @@ contract SavingCore is ERC721, Ownable, Pausable {
         uint256 interest = _calcInterest(
             cert.principal,
             cert.aprBpsAtOpen,
-            cert.tenorDays * 1 days
+            cert.tenorSeconds
         );
 
         cert.status = DepositStatus.Withdrawn;
@@ -304,7 +316,7 @@ contract SavingCore is ERC721, Ownable, Pausable {
         cert.status = DepositStatus.Withdrawn;
 
         // Update tracking (early withdraw: no interest owed)
-        uint256 interestWouldOwed = _calcInterest(cert.principal, cert.aprBpsAtOpen, cert.tenorDays * 1 days);
+        uint256 interestWouldOwed = _calcInterest(cert.principal, cert.aprBpsAtOpen, cert.tenorSeconds);
         totalPrincipalLocked -= cert.principal;
         if (totalInterestOwed >= interestWouldOwed)
             totalInterestOwed -= interestWouldOwed;
@@ -344,7 +356,7 @@ contract SavingCore is ERC721, Ownable, Pausable {
         uint256 interest = _calcInterest(
             cert.principal,
             cert.aprBpsAtOpen,
-            cert.tenorDays * 1 days
+            cert.tenorSeconds
         );
         uint256 newPrincipal = cert.principal + interest;
 
@@ -356,14 +368,14 @@ contract SavingCore is ERC721, Ownable, Pausable {
 
         // Mint new deposit NFT
         newDepositId = nextDepositId++;
-        uint256 newMaturityAt = block.timestamp + newPlan.tenorDays * 1 days;
+        uint256 newMaturityAt = block.timestamp + newPlan.tenorSeconds;
 
         deposits[newDepositId] = DepositCert({
             planId:           newPlanId,
             principal:        newPrincipal,
             aprBpsAtOpen:     newPlan.aprBps,
             penaltyBpsAtOpen: newPlan.earlyWithdrawPenaltyBps,
-            tenorDays:        newPlan.tenorDays,
+            tenorSeconds:     newPlan.tenorSeconds,
             startAt:          block.timestamp,
             maturityAt:       newMaturityAt,
             status:           DepositStatus.Active
@@ -385,7 +397,7 @@ contract SavingCore is ERC721, Ownable, Pausable {
     {
         DepositCert storage cert = _requireActiveDeposit(depositId);
 
-        uint256 gracePeriodEnd = cert.maturityAt + GRACE_PERIOD;
+        uint256 gracePeriodEnd = cert.maturityAt + gracePeriod;
         if (block.timestamp < gracePeriodEnd)
             revert GracePeriodNotExpired(depositId, gracePeriodEnd, block.timestamp);
 
@@ -395,7 +407,7 @@ contract SavingCore is ERC721, Ownable, Pausable {
         uint256 interest = _calcInterest(
             cert.principal,
             cert.aprBpsAtOpen,
-            cert.tenorDays * 1 days
+            cert.tenorSeconds
         );
         uint256 newPrincipal = cert.principal + interest;
 
@@ -407,14 +419,14 @@ contract SavingCore is ERC721, Ownable, Pausable {
 
         // Mint new deposit — same tenor, APR locked to original
         newDepositId = nextDepositId++;
-        uint256 newMaturityAt = block.timestamp + cert.tenorDays * 1 days;
+        uint256 newMaturityAt = block.timestamp + cert.tenorSeconds;
 
         deposits[newDepositId] = DepositCert({
             planId:           cert.planId,
             principal:        newPrincipal,
             aprBpsAtOpen:     cert.aprBpsAtOpen,   // locked to original APR
             penaltyBpsAtOpen: cert.penaltyBpsAtOpen,
-            tenorDays:        cert.tenorDays,
+            tenorSeconds:     cert.tenorSeconds,
             startAt:          block.timestamp,
             maturityAt:       newMaturityAt,
             status:           DepositStatus.Active
