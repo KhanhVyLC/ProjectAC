@@ -1,3 +1,5 @@
+//D:\Coding\Project\scripts\deploy.js
+
 const { ethers, run, network } = require("hardhat");
 
 async function main() {
@@ -49,12 +51,16 @@ async function main() {
   await (await vault.fundVault(USDC(500_000))).wait();
   console.log("   ✓ Vault funded: 500,000 USDC");
 
-  await (await core.createPlan(7,   200, 0, 0, 300)).wait();
-  await (await core.createPlan(30,  350, 0, 0, 400)).wait();
-  await (await core.createPlan(90,  500, 0, 0, 500)).wait();
-  await (await core.createPlan(180, 700, 0, 0, 500)).wait();
-  await (await core.createPlan(365, 1000,0, 0, 500)).wait();
-  console.log("   ✓ 5 saving plans created");
+  const H = (h) => h * 3600;           // giờ → giây
+  const D = (d) => d * 86400;          // ngày → giây
+
+  await (await core.createPlan(H(1),  200,  0, 0, 300)).wait(); // 1 giờ,   2% APR
+  await (await core.createPlan(H(12), 300,  0, 0, 400)).wait(); // 12 giờ,  3% APR
+  await (await core.createPlan(D(7),  350,  0, 0, 400)).wait(); // 7 ngày,  3.5% APR
+  await (await core.createPlan(D(30), 500,  0, 0, 500)).wait(); // 30 ngày, 5% APR
+  await (await core.createPlan(D(90), 700,  0, 0, 500)).wait(); // 90 ngày, 7% APR
+  await (await core.createPlan(D(365),1000, 0, 0, 500)).wait(); // 1 năm,   10% APR
+  console.log("   ✓ 6 saving plans created (1h, 12h, 7d, 30d, 90d, 365d)");
 
   console.log("\n════════════════════════════════════════");
   console.log("  Deployment Complete!");
