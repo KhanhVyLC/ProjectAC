@@ -38,7 +38,7 @@ module.exports = {
     },
   },
   etherscan: {
-    apiKey: ETHERSCAN_KEY,   // Etherscan v2: dùng 1 key duy nhất
+    apiKey: ETHERSCAN_KEY,   // Etherscan v2
   },
 };
 ```
