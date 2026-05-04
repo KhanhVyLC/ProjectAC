@@ -204,9 +204,6 @@ Manual renew và auto renew đúng, test coverage >90%.
 - [x] **Full security flow**: integrity fail → pause → user bị chặn → unpause
 - [x] `npx hardhat coverage` → **>90%**
 
-### Lưu ý quan trọng
-
-> **APR lock**: gọi `updatePlan` hạ APR TRƯỚC `autoRenewDeposit`, verify `newCert.aprBpsAtOpen === originalApr`.
 
 ---
 ## Ngày 3 — Frontend React
