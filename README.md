@@ -1,10 +1,10 @@
 # ChainSave — Blockchain Term Deposit System
 
 
-<p align="center">
+
   <strong>A decentralized fixed-term savings protocol on Ethereum Sepolia</strong><br/>
   Lock USDC, earn interest, receive an NFT certificate — all on-chain.
-</p>
+
 
 
 
