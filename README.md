@@ -133,9 +133,9 @@ interest = (principal × aprBps × tenorSeconds) / (365 × 86400 × 10_000)
 - Node.js ≥ 18
 - npm ≥ 9
 - MetaMask browser extension
-- Infura or Alchemy account (for Sepolia RPC)
+- Infura account (for Sepolia RPC)
 
-### Installation
+### Install
 
 ```bash
 git clone https://github.com/your-username/chainsave.git
@@ -311,6 +311,3 @@ chainsave/
 
 ---
 
-## License
-
-MIT © 2025 — ChainSave
