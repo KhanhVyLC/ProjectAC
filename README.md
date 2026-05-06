@@ -1,4 +1,4 @@
-# ⛓️ ChainSave — Blockchain Term Deposit System
+#  ChainSave — Blockchain Term Deposit System
 
 > **A decentralized fixed-term deposit system built on Blockchain**
 
