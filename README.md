@@ -1,8 +1,14 @@
-#  ChainSave — Blockchain Term Deposit System
+# ⛓️ ChainSave — Blockchain Term Deposit System
 
 > **A decentralized fixed-term deposit system built on Blockchain**
 
 ChainSave allows users to deposit assets (MockUSDC) into Saving Plans created by the Admin and earn interest (APR). Each deposit is uniquely represented by an **NFT (ERC721)** that acts as an on-chain certificate of deposit.
+
+---
+
+## 🎬 Demo
+
+[![Watch the demo](https://youtu.be/YexGlYJmP-A)
 
 ---
 
@@ -198,6 +204,8 @@ npm run bot:sepolia
 | **Bot** | Node.js, TypeScript |
 | **Infrastructure** | Infura RPC, Etherscan API, Sepolia Testnet |
 
+---
 
+## 📄 License
 
-
+This project is licensed under the MIT License.
