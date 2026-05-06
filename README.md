@@ -1,151 +1,120 @@
-# ChainSave — Blockchain Term Deposit System
+# ⛓️ ChainSave — Blockchain Term Deposit System
 
+> **Hệ thống tiền gửi tiết kiệm có kỳ hạn phi tập trung (Term Deposit) trên nền tảng Blockchain**
 
-
-  <strong>A decentralized fixed-term savings protocol on Ethereum Sepolia</strong><br/>
-  Lock USDC, earn interest, receive an NFT certificate — all on-chain.
-
-
-
-
-
-## Overview
-
-**ChainSave** is a blockchain-based term deposit system inspired by traditional bank savings products. Users lock MockUSDC tokens for a fixed period (1 hour to 1 year), earn simple interest, and receive an **ERC-721 NFT certificate** as proof of deposit.
-
-Key features:
-
-- **Fixed-term plans** — 6 durations: 1h, 12h, 7d, 30d, 90d, 1y
-- **APR snapshot** — interest rate is locked at deposit time, immune to future admin changes
-- **Early withdrawal** — allowed with a configurable penalty
-- **Manual & auto renewal** — compound interest into a new deposit
-- **Admin vault** — separate `VaultManager` holds the interest liquidity pool
-- **Pause mechanism** — emergency stop for all user operations
-- **Auto-renew bot** — off-chain TypeScript bot renews expired deposits after the grace period
+ChainSave cho phép người dùng gửi tài sản (MockUSDC) vào các gói tiết kiệm (Saving Plans) do Admin tạo ra để nhận lãi suất (APR). Đặc biệt, mỗi khoản tiền gửi được đại diện bằng một **NFT (ERC721)** đóng vai trò như một chứng chỉ tiền gửi on-chain.
 
 ---
 
-## Architecture
+## 🌟 Tính năng chính
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                        User / Admin                      │
-└────────────────────────┬────────────────────────────────┘
-                         │ MetaMask (ethers.js v6)
-                         ▼
-┌─────────────────────────────────────────────────────────┐
-│                    React + Vite Frontend                  │
-└───────────┬─────────────────────────┬───────────────────┘
-            │                         │
-            ▼                         ▼
-┌───────────────────┐     ┌───────────────────────────────┐
-│    MockUSDC.sol   │     │         SavingCore.sol         │
-│  ERC20 · 6 dec   │◄────│  ERC721 · Plans · Deposits    │
-│  Mintable (Admin) │     │  openDeposit / withdraw        │
-└───────────────────┘     │  renewDeposit / autoRenew      │
-                          └───────────────┬───────────────┘
-                                          │ payInterest()
-                                          ▼
-                          ┌───────────────────────────────┐
-                          │       VaultManager.sol         │
-                          │  Interest pool · feeReceiver   │
-                          │  fundVault / withdrawVault     │
-                          └───────────────────────────────┘
-```
+### 🧑‍💻 Dành cho Người dùng (Depositor)
 
----
-
-## Money Flow
-
-```
-User
- │  approve(vaultAddr, amount)
- │  openDeposit(planId, amount)
- ▼
-SavingCore ── holds principal (in contract)
-              mints NFT to user
-                    │
-                    │ at maturity
-                    ▼
-              return principal ──► User
-              VaultManager.payInterest() ──► User
-
-Early Withdraw:
-  principal - penalty ──► User
-  penalty ──────────────► feeReceiver (direct, bypasses vault)
-```
-
----
-
-## Smart Contracts
-
-### `MockUSDC.sol`
-ERC-20 token with 6 decimals mimicking real USDC. Only the owner (deployer) can mint.
-
-### `VaultManager.sol`
-Holds the interest liquidity pool. Only `SavingCore` can call `payInterest()`. Admin can `fundVault`, `withdrawVault`, change `feeReceiver`, and `pause`/`unpause`.
-
-### `SavingCore.sol`
-Core logic contract. Extends ERC-721 — each deposit is an NFT (`SCERT`).
-
-| Function | Description |
+| Tính năng | Mô tả |
 |---|---|
-| `createPlan(...)` | Admin creates a saving plan |
-| `openDeposit(planId, amount)` | User opens a deposit, receives NFT |
-| `withdrawAtMaturity(depositId)` | User withdraws principal + interest |
-| `earlyWithdraw(depositId)` | User withdraws early with penalty |
-| `renewDeposit(depositId, newPlanId)` | User manually renews a matured deposit |
-| `autoRenewDeposit(depositId)` | Anyone triggers auto-renewal after grace period |
-| `integrityCheck()` | Admin compares actual vs book balances |
-| `financialSummary()` | Full reconciliation dashboard |
-| `vaultSolvencyCheck()` | Check if vault covers all interest owed |
+| **Gửi tiết kiệm (Open Deposit)** | Chọn gói tiết kiệm, khóa USDC và nhận về một chứng chỉ NFT. APR được chốt (snapshot) ngay tại thời điểm gửi. |
+| **Rút tiền đúng hạn (Withdraw at Maturity)** | Rút gốc và nhận lãi suất từ Vault một cách an toàn. |
+| **Rút tiền trước hạn (Early Withdraw)** | Rút tiền bất cứ lúc nào, nhưng bị trừ phí phạt (Penalty) chuyển trực tiếp cho Fee Receiver. |
+| **Gia hạn thủ công (Manual Renew)** | Chọn gói mới và cộng dồn lãi vào gốc để tiếp tục gửi. |
+| **Gia hạn tự động (Auto Renew)** | Nếu quá thời gian ân hạn (Grace Period) mà không rút, hệ thống bot tự động gia hạn với mức APR ban đầu. |
 
-#### Interest Formula
-```
-interest = (principal × aprBps × tenorSeconds) / (365 × 86400 × 10_000)
-```
+### 👑 Dành cho Quản trị viên (Admin)
 
-> Example: 1,000 USDC × 250 bps × 90 days ≈ **6.16 USDC**
-
----
-
-## Deployed Addresses
-
-> Network: **Sepolia Testnet** (Chain ID: 11155111)
-
-| Contract | Address |
+| Tính năng | Mô tả |
 |---|---|
-| MockUSDC | `0x...` |
-| VaultManager | `0x...` |
-| SavingCore | `0x...` |
-
-🔗 Etherscan:
-- MockUSDC: `https://sepolia.etherscan.io/address/0x...`
-- VaultManager: `https://sepolia.etherscan.io/address/0x...`
-- SavingCore: `https://sepolia.etherscan.io/address/0x...`
+| **Quản lý Gói (Plan Management)** | Tạo gói mới (kỳ hạn, APR, min/max deposit, phí phạt), cập nhật APR, bật/tắt gói. |
+| **Quản lý Vault (Vault Management)** | Nạp tiền trả lãi (Fund Vault), rút tiền, theo dõi dashboard đối soát (Solvency Check). |
+| **Bảo mật & Kiểm soát** | Emergency Pause/Unpause toàn bộ hệ thống, kiểm tra tính toàn vẹn dữ liệu (Integrity Check). |
 
 ---
 
-## Getting Started
+## 🏗 Kiến trúc Hệ thống
 
-### Prerequisites
+Hệ thống được chia làm **4 thành phần chính** hoạt động chặt chẽ với nhau:
 
-- Node.js ≥ 18
-- npm ≥ 9
-- MetaMask browser extension
-- Infura account (for Sepolia RPC)
+### 1. 📜 Smart Contracts (Solidity 0.8.26 — OpenZeppelin v5)
 
-### Install
+| Contract | Vai trò |
+|---|---|
+| `MockUSDC.sol` | Token ERC20 mô phỏng USDC (6 decimals), tích hợp tính năng mint cho Admin. |
+| `VaultManager.sol` | Kho bạc chứa tiền lãi (Interest Pool), quản lý địa chỉ nhận phí phạt và trạng thái Pause. |
+| `SavingCore.sol` | Trái tim của dự án — quản lý gói tiết kiệm, phát hành NFT (ERC721), xử lý logic lãi suất/phí phạt. |
+
+### 2. 🖥️ Frontend (React + Vite + ethers.js v6)
+
+- Giao diện tương tác trực tiếp với Smart Contract qua **MetaMask** trên mạng **Sepolia**.
+- Phân quyền hiển thị linh hoạt: **Admin** (Dashboard quản trị) và **Người dùng** (Deposit, Withdraw, Renew).
+
+### 3. 🤖 Auto-Renew Bot (Node.js/TypeScript)
+
+- Batch job tự động quét các Events trên chain mỗi ngày.
+- Phát hiện khoản gửi quá thời gian ân hạn → gọi `autoRenewDeposit` để bảo vệ lợi ích người dùng.
+
+### 4. 🌐 Backend / Mạng lưới
+
+- Mạng **Sepolia Testnet** thông qua RPC Provider **Infura**.
+
+---
+
+## 📂 Cấu trúc Thư mục
+
+```
+chainsave/
+├── contracts/              # Mã nguồn Smart Contracts
+│   ├── MockUSDC.sol
+│   ├── SavingCore.sol
+│   └── VaultManager.sol
+├── deploy/                 # Script deploy (tự động cập nhật ABI cho frontend)
+│   └── deploy.ts
+├── scripts/                # Các script hỗ trợ hệ thống
+│   └── autoRenewBot.ts     # Bot quét và tự động gia hạn tiết kiệm
+├── test/                   # Unit test cho Smart Contracts (>90% coverage)
+│   └── SavingCore.test.ts
+├── typechain-types/        # Type definitions tự động sinh khi compile
+├── frontend/               # Ứng dụng web ReactJS (Vite)
+│   ├── public/             # Hình ảnh, icons
+│   ├── src/
+│   │   ├── assets/
+│   │   ├── App.css
+│   │   ├── App.jsx         # Logic giao diện chính
+│   │   ├── contracts.js    # Địa chỉ Contract & ABI (tự động sinh khi deploy)
+│   │   ├── index.css       # Styling
+│   │   └── main.jsx
+│   ├── index.html
+│   ├── package.json
+│   └── vite.config.js
+├── hardhat.config.ts       # Cấu hình Hardhat (Compiler, Mạng Sepolia, Etherscan)
+├── tsconfig.json
+├── tsconfig.node.json
+├── package.json
+├── .env                    # Biến môi trường (Private key, API Keys) — không commit
+├── .gitignore
+└── README.md
+```
+
+---
+
+## 🚀 Hướng dẫn Cài đặt & Chạy dự án
+
+### Yêu cầu hệ thống
+
+- [Node.js](https://nodejs.org/) (Khuyến nghị bản LTS)
+- [MetaMask Extension](https://metamask.io/)
+- Tài khoản [Infura](https://infura.io/) và [Etherscan](https://etherscan.io/) (để lấy API Key)
+
+---
+
+### Bước 1: Cài đặt và Cấu hình Môi trường
+
+Clone dự án và cài đặt dependencies:
 
 ```bash
-git clone https://github.com/your-username/chainsave.git
+git clone <your-repo-url>
 cd chainsave
 npm install
 ```
 
-### Environment Variables
-
-Create a `.env` file in the project root:
+Tạo file `.env` tại thư mục gốc:
 
 ```env
 PRIVATE_KEY=0xyour_private_key_here
@@ -153,72 +122,48 @@ INFURA_PROJECT_ID=your_infura_project_id
 ETHERSCAN_API_KEY=your_etherscan_api_key
 ```
 
-> ⚠️ Never commit your `.env` file. It is already listed in `.gitignore`.
+---
 
-### Compile Contracts
+### Bước 2: Biên dịch và Test Smart Contract
+
+Compile contract (tạo ra thư mục `typechain-types/`):
 
 ```bash
 npx hardhat compile
 ```
 
-This generates TypeScript typings in `typechain-types/`.
-
----
-
-## Running Tests
+Chạy Unit Test và kiểm tra coverage:
 
 ```bash
-# Run all tests
 npx hardhat test
-
-# Run with coverage report
 npx hardhat coverage
 ```
 
-Test coverage target: **> 90%**
-
-Coverage includes:
-
-- Plan management (create, update, enable, disable)
-- Deposit lifecycle (open, withdraw at maturity, early withdraw)
-- Renewal logic (manual renew, auto renew, APR lock)
-- Vault operations (fund, withdraw, over-withdraw revert)
-- Pause/unpause behavior
-- Integrity and solvency checks
-- Interest math precision
-- Full security flow: integrity fail → pause → block users → unpause
-
 ---
 
-## Deployment
+### Bước 3: Triển khai (Deployment)
 
-### Local (Hardhat Node)
+**Option A — Localhost (Môi trường test cục bộ)**
 
 ```bash
-# Terminal 1 — start local node
+# Terminal 1: Chạy local node
 npm run node
 
-# Terminal 2 — deploy contracts
+# Terminal 2: Deploy
 npm run deploy:local
 ```
 
-### Sepolia Testnet
+**Option B — Sepolia Testnet**
 
 ```bash
 npm run deploy:sepolia
 ```
 
-> The script automatically:
-> - Deploys all 3 contracts
-> - Links `VaultManager` ↔ `SavingCore`
-> - Funds the vault with 500,000 USDC
-> - Creates 6 saving plans
-> - Updates `frontend/src/contracts.js` with new addresses
-> - Verifies contracts on Etherscan (if `ETHERSCAN_API_KEY` is set)
+> 💡 Script deploy sẽ tự động khởi tạo các gói plan cơ bản, cấp vốn cho Vault và cập nhật file `frontend/src/contracts.js` với ABI & địa chỉ mới nhất.
 
 ---
 
-## Frontend
+### Bước 4: Chạy Giao diện người dùng (Frontend)
 
 ```bash
 cd frontend
@@ -226,88 +171,34 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173` in your browser with MetaMask connected to **Sepolia**.
-
-### Depositor Features
-
-- Connect / disconnect MetaMask wallet
-- Browse saving plans (tenor, APR, min/max deposit, penalty)
-- Open a deposit with live interest preview
-- View all personal deposits with real-time status
-- Withdraw at maturity, early withdraw, manual renew, trigger auto-renew
-
-### Admin Features
-
-Available when connected with the deployer address:
-
-| Feature | Description |
-|---|---|
-| Create Plan | Add new saving plans |
-| Update APR | Change rate (existing deposits unaffected) |
-| Enable / Disable Plan | Toggle plan availability |
-| Manage Vault | Fund or withdraw liquidity pool |
-| Fee Receiver | Change penalty recipient address |
-| Pause System | Emergency stop for all operations |
-| Mint USDC | Mint test tokens to any address |
-| Security Monitor | Integrity check + vault solvency dashboard |
+Truy cập ứng dụng tại: **http://localhost:5173**
 
 ---
 
-## Auto-Renew Bot
-
-The bot scans all `DepositOpened` and `Renewed` events, identifies deposits past their grace period, and calls `autoRenewDeposit()` on each.
+### Bước 5: Chạy Bot gia hạn tự động (Auto-Renew Bot)
 
 ```bash
-# Local
+# Test trên local
 npm run bot:local
 
-# Sepolia
+# Test trên mạng Sepolia
 npm run bot:sepolia
 ```
 
-- Runs a batch job daily at **00:00** (configurable)
-- One failing deposit does not stop the entire batch
-- Detailed logs: deposit ID, owner, principal, APR, tx hash
-- Displays countdown to next scheduled run
+---
+
+## 🛠 Công nghệ sử dụng
+
+| Layer | Công nghệ |
+|---|---|
+| **Smart Contract** | Solidity 0.8.26, Hardhat, ethers.js v6, OpenZeppelin v5 |
+| **EVM Version** | Cancun (hỗ trợ Opcode `mcopy` của OpenZeppelin v5) |
+| **Frontend** | ReactJS, Vite, CSS |
+| **Bot** | Node.js, TypeScript |
+| **Hạ tầng** | Infura RPC, Etherscan API, Sepolia Testnet |
 
 ---
 
-## Directory Structure
+## 📄 License
 
-```
-chainsave/
-├── contracts/
-│   ├── MockUSDC.sol
-│   ├── VaultManager.sol
-│   └── SavingCore.sol
-├── deploy/
-│   └── deploy.ts
-├── scripts/
-│   └── autoRenewBot.ts
-├── test/
-│   └── SavingCore.test.ts
-├── frontend/
-│   ├── public/          # PNG icons + logo
-│   └── src/
-│       ├── App.jsx
-│       ├── contracts.js # Auto-updated by deploy.ts
-│       ├── index.css
-│       └── main.jsx
-├── hardhat.config.ts
-├── tsconfig.json
-├── .env                 # Not committed
-└── .gitignore
-```
-
----
-
-## Security Notes
-
-- **APR Snapshot**: APR is locked at deposit open time — admin changes cannot retroactively affect existing deposits.
-- **Penalty bypasses vault**: Early withdrawal penalty is sent directly to `feeReceiver` via `safeTransfer`, ensuring it is never blocked by a vault pause.
-- **Grace period shortfall**: If the vault lacks sufficient interest at maturity, the user always receives their full principal; available interest is paid and a `InterestShortfall` event is emitted.
-- **Integrity check**: `integrityCheck()` compares the contract's actual token balance against `totalPrincipalLocked` — any mismatch signals a potential exploit.
-- **evmVersion cancun**: Required for OpenZeppelin v5 which uses the `mcopy` opcode introduced in the Cancun hard fork.
-
----
-
+This project is licensed under the MIT License.
