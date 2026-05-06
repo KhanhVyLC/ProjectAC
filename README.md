@@ -198,8 +198,6 @@ npm run bot:sepolia
 | **Bot** | Node.js, TypeScript |
 | **Infrastructure** | Infura RPC, Etherscan API, Sepolia Testnet |
 
----
 
-## 📄 License
 
 This project is licensed under the MIT License.
