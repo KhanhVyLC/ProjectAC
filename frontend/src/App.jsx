@@ -355,6 +355,7 @@ function AdminPanel({ panelKey, onBack, vault, core, usdc, signer, account,
             <select style={{ ...S.input, marginTop: 0, width: 100 }}
               value={newPlan.tenorUnit}
               onChange={e => setNewPlan(p => ({ ...p, tenorUnit: e.target.value }))}>
+              <option value="seconds">Giây</option>
               <option value="hours">Giờ</option>
               <option value="days">Ngày</option>
             </select>
@@ -367,7 +368,9 @@ function AdminPanel({ panelKey, onBack, vault, core, usdc, signer, account,
         <button style={S.btnP} disabled={!!loading}
           onClick={() => withLoading("Tạo Plan", async () => {
             const u = v => v && v !== "0" ? ethers.parseUnits(v, 6) : 0n;
-            const tenorSec = newPlan.tenorUnit === "hours"
+            const tenorSec = newPlan.tenorUnit === "seconds"
+            ? BigInt(Math.round(parseFloat(newPlan.tenorVal)))
+            : newPlan.tenorUnit === "hours"
               ? BigInt(Math.round(parseFloat(newPlan.tenorVal) * 3600))
               : BigInt(Math.round(parseFloat(newPlan.tenorVal) * 86400));
             await (await core.createPlan(tenorSec, BigInt(newPlan.aprBps),
@@ -764,24 +767,38 @@ function RenewModal({ deposit, plans, core, onClose, loading, withLoading }) {
   );
 }
 
-function DepositCard({ dep, plans, core, isPaused, loading, withLoading }) {
+// ─── DepositCard ──────────────────────────────────────────────────────────────
+// gracePeriod (số giây) được truyền từ App — đọc thực tế từ contract
+function DepositCard({ dep, plans, core, isPaused, loading, withLoading, gracePeriod }) {
   const [modal, setModal] = useState(null);
-  const now            = Math.floor(Date.now() / 1000);
+
+  // ── Live countdown: tick mỗi giây khi deposit còn Active ──────────────────
+  const [now, setNow] = useState(Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    if (dep.status !== 0n) return; // không tick nếu không còn Active
+    const t = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
+    return () => clearInterval(t);
+  }, [dep.status]);
+
   const isActive       = dep.status === 0n;
   const maturity       = Number(dep.maturityAt);
   const isMatured      = isActive && now >= maturity;
   const isEarly        = isActive && now < maturity;
-  const gracePeriodEnd = Number(dep.gracePeriodEnd ?? (maturity + 3 * 86400));
+
+  // dùng gracePeriod từ prop (đọc thực tế từ contract)
+  const gracePeriodEnd = maturity + gracePeriod;
   const canAutoRenew   = isActive && now >= gracePeriodEnd;
 
   const estInterest = isActive
     ? fmt((dep.principal * dep.aprBpsAtOpen * dep.tenorSeconds) / (365n * 86400n * 10000n))
     : "—";
 
+  // Format thời gian còn lại — hiển thị đến giây khi < 1 giờ
   const fmtRemaining = (endTs) => {
     const rem = endTs - now;
     if (rem <= 0)    return "đã đáo hạn";
-    if (rem < 3600)  return `${Math.ceil(rem / 60)} phút`;
+    if (rem < 60)    return `${rem} giây`;
+    if (rem < 3600)  return `${Math.floor(rem / 60)} phút ${rem % 60} giây`;
     if (rem < 86400) return `${Math.floor(rem / 3600)} giờ ${Math.floor((rem % 3600) / 60)} phút`;
     return `${Math.floor(rem / 86400)} ngày ${Math.floor((rem % 86400) / 3600)} giờ`;
   };
@@ -842,14 +859,11 @@ function DepositCard({ dep, plans, core, isPaused, loading, withLoading }) {
       )}
       {isMatured && !canAutoRenew && !isPaused && (
         <div style={{ marginTop: 8, padding: "8px 12px", background: "#1c1917", borderRadius: 8, color: "#fbbf24", fontSize: 13 }}>
+          {/* ← THAY ĐỔI: thời gian còn lại tính từ gracePeriodEnd thực tế của contract */}
           ⏱ Trong grace period — còn {fmtRemaining(gracePeriodEnd)} để tự rút hoặc gia hạn thủ công
         </div>
       )}
-      {canAutoRenew && !isPaused && (
-        <div style={{ marginTop: 8, padding: "8px 12px", background: "#1c1917", borderRadius: 8, color: "#fbbf24", fontSize: 13 }}>
-          ⚡ Grace period đã hết — sẵn sàng Auto Renew
-        </div>
-      )}
+
       {isPaused && isActive && (
         <div style={{ marginTop: 8, padding: "10px 14px", background: "#450a0a", borderRadius: 8, color: "#fca5a5", fontSize: 13, textAlign: "center" }}>
           ⏸ Hệ thống đang tạm dừng — mọi giao dịch bị chặn
@@ -876,14 +890,7 @@ function DepositCard({ dep, plans, core, isPaused, loading, withLoading }) {
               <button style={S.btnA} onClick={() => setModal("renew")}>🔄 Gia hạn</button>
             </>
           )}
-          {canAutoRenew && (
-            <button style={S.btnA} onClick={() => {
-              if (!window.confirm(`Auto Renew:\n• Kỳ hạn: giữ nguyên\n• APR: ${fmtApr(dep.aprBpsAtOpen)} (APR gốc được bảo vệ)\n• Vốn mới = vốn cũ + lãi\nTiếp tục?`)) return;
-              withLoading("Auto Renew", async () => { await (await core.autoRenewDeposit(dep.id)).wait(); });
-            }}>
-              ⚡ Trigger Auto Renew
-            </button>
-          )}
+
         </div>
       )}
     </div>
@@ -895,27 +902,29 @@ function DepositCard({ dep, plans, core, isPaused, loading, withLoading }) {
 // ═════════════════════════════════════════════════════════════════════════════
 
 export default function App() {
-  const [signer,    setSigner]    = useState(null);
-  const [account,   setAccount]   = useState("");
-  const [core,      setCore]      = useState(null);
-  const [usdc,      setUsdc]      = useState(null);
-  const [vault,     setVault]     = useState(null);
-  const [plans,     setPlans]     = useState([]);
-  const [deposits,  setDeposits]  = useState([]);
-  const [balance,   setBalance]   = useState(0n);
-  const [vaultBal,  setVaultBal]  = useState(0n);
-  const [isAdmin,   setIsAdmin]   = useState(false);
-  const [isPaused,  setIsPaused]  = useState(false);
-  const [tab,       setTab]       = useState("plans");
-  const [loading,   setLoading]   = useState("");
-  const [toast,     setToast]     = useState(null);
-  const [openModal, setOpenModal] = useState(null);
+  const [signer,      setSigner]      = useState(null);
+  const [account,     setAccount]     = useState("");
+  const [core,        setCore]        = useState(null);
+  const [usdc,        setUsdc]        = useState(null);
+  const [vault,       setVault]       = useState(null);
+  const [plans,       setPlans]       = useState([]);
+  const [deposits,    setDeposits]    = useState([]);
+  const [balance,     setBalance]     = useState(0n);
+  const [vaultBal,    setVaultBal]    = useState(0n);
+  const [isAdmin,     setIsAdmin]     = useState(false);
+  const [isPaused,    setIsPaused]    = useState(false);
+  const [tab,         setTab]         = useState("plans");
+  const [loading,     setLoading]     = useState("");
+  const [toast,       setToast]       = useState(null);
+  const [openModal,   setOpenModal]   = useState(null);
+  // ← THÊM MỚI: state lưu grace period đọc từ contract (default 3 ngày)
+  const [gracePeriod, setGracePeriod] = useState(3 * 86400);
 
   // ── Connect / Disconnect ──────────────────────────────────────────────────
   const disconnect = () => {
     setSigner(null); setAccount(""); setCore(null); setUsdc(null); setVault(null);
     setPlans([]); setDeposits([]); setBalance(0n); setVaultBal(0n);
-    setIsAdmin(false); setIsPaused(false);
+    setIsAdmin(false); setIsPaused(false); setGracePeriod(3 * 86400);
   };
 
   const connect = async () => {
@@ -957,40 +966,32 @@ export default function App() {
     setPlans(arr);
   }, [core]);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // loadDeposits — FIXED version
-  //   Bug 1: originalId không được destructure → ReferenceError bị nuốt silent
-  //   Bug 2: newId từ renewEvs không được lấy đúng → không trace được renew chain
-  // ─────────────────────────────────────────────────────────────────────────
   const loadDeposits = useCallback(async () => {
     if (!core || !account) return;
     try {
       const allIds = new Set();
 
-      // 1. Deposit gốc do account này mở (lọc theo owner ngay trên event)
       const openEvs = await core.queryFilter(
         core.filters.DepositOpened(null, account), 0, "latest"
       );
       for (const e of openEvs) allIds.add(String(BigInt(e.args[0])));
 
-      // 2. Build map: newDepositId → oldDepositId từ tất cả Renewed events
       const renewEvs = await core.queryFilter(core.filters.Renewed(), 0, "latest");
-      const renewedFromStr = {}; // newId(string) → oldId(string)
+      const renewedFromStr = {};
       for (const e of renewEvs) {
-        const oldId = String(BigInt(e.args[0])); // args[0] = oldDepositId
-        const newId = String(BigInt(e.args[1])); // args[1] = newDepositId ← FIX: phải dùng args[1]
+        const oldId = String(BigInt(e.args[0]));
+        const newId = String(BigInt(e.args[1]));
         renewedFromStr[newId] = oldId;
-        allIds.add(newId); // thêm để check owner sau
+        allIds.add(newId);
       }
 
-      // 3. Hàm trace ngược về deposit gốc và đếm số lần renew
       const traceOrigin = async (idBigInt) => {
         let curId  = String(BigInt(idBigInt));
         let count  = 0;
         const visited = new Set();
 
         while (renewedFromStr[curId] !== undefined) {
-          if (visited.has(curId)) break; // bảo vệ vòng lặp vô hạn
+          if (visited.has(curId)) break;
           visited.add(curId);
           curId = renewedFromStr[curId];
           count++;
@@ -999,32 +1000,30 @@ export default function App() {
         try {
           const orig = await core.getDeposit(BigInt(curId));
           return {
-            originalStartAt: orig[5],                // startAt của deposit gốc
+            originalStartAt: orig[5],
             renewCount:      count,
-            originalId:      BigInt(curId),           // ← FIX: destructure đủ 3 fields
+            originalId:      BigInt(curId),
           };
         } catch {
           return {
             originalStartAt: null,
             renewCount:      count,
-            originalId:      BigInt(idBigInt),        // fallback về chính nó
+            originalId:      BigInt(idBigInt),
           };
         }
       };
 
-      // 4. Lọc: chỉ giữ deposit Active thuộc account
       const active = [];
       for (const idStr of allIds) {
         const id = BigInt(idStr);
         try {
-          // Kiểm tra owner trước để tránh đọc dữ liệu thừa
           const owner = await core.ownerOf(id);
           if (owner.toLowerCase() !== account.toLowerCase()) continue;
 
           const d = await core.getDeposit(id);
-          if (Number(d[7]) !== 0) continue; // chỉ lấy status = Active (0)
+          const status = Number(d[7]);
+          if (status !== 0 && status !== 1) continue;
 
-          // ← FIX: destructure đủ originalId, originalStartAt, renewCount
           const { originalStartAt, renewCount, originalId } = await traceOrigin(id);
 
           active.push({
@@ -1038,16 +1037,14 @@ export default function App() {
             maturityAt:       d[6],
             status:           d[7],
             originalStartAt:  originalStartAt ?? d[5],
-            originalId:       originalId ?? id,       // ← FIX: dùng biến đã destructure
+            originalId:       originalId ?? id,
             renewCount,
           });
         } catch (e) {
-          // Token burned / không tồn tại → bỏ qua, không crash toàn bộ loop
           console.warn(`Skip deposit #${id}:`, e.message);
         }
       }
 
-      // Sắp xếp deposit mới nhất (startAt lớn nhất) lên đầu
       active.sort((a, b) => Number(b.startAt) - Number(a.startAt));
       setDeposits(active);
     } catch (e) {
@@ -1065,6 +1062,11 @@ export default function App() {
         core.paused().catch(() => false),
       ]);
       setIsPaused(vp || cp);
+    } catch {}
+    // ← THÊM MỚI: đọc gracePeriod thực tế từ contract
+    try {
+      const gp = await core.gracePeriod();
+      setGracePeriod(Number(gp));
     } catch {}
     if (usdc && account) {
       try { setBalance(await usdc.balanceOf(account)); } catch {}
@@ -1166,9 +1168,9 @@ export default function App() {
                 Vault: {fmt(vaultBal)}
               </span>
             )}
-            <span 
-              style={{ 
-                ...S.chip, 
+            <span
+              style={{
+                ...S.chip,
                 fontFamily: "monospace",
                 fontSize: 11,
                 maxWidth: "none",
@@ -1182,7 +1184,7 @@ export default function App() {
               title="Click để copy"
             >
               {account}
-</span>
+            </span>
             <button style={{ ...S.btnS, padding: "6px 12px", fontSize: 12 }} onClick={disconnect}>
               Đăng xuất
             </button>
@@ -1276,7 +1278,9 @@ export default function App() {
                 </div>
               ) : deposits.map(d => (
                 <DepositCard key={String(d.id)} dep={d} plans={plans} core={core}
-                  isPaused={isPaused} loading={loading} withLoading={withLoading} />
+                  isPaused={isPaused} loading={loading} withLoading={withLoading}
+                  gracePeriod={gracePeriod} /* ← THÊM MỚI: truyền gracePeriod thực tế */
+                />
               ))}
             </div>
           )}
