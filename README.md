@@ -8,7 +8,7 @@ ChainSave allows users to deposit assets (MockUSDC) into Saving Plans created by
 
 ## 🎬 Demo
 
-[![Watch the demo](https://youtu.be/YexGlYJmP-A)
+[![Watch the demo](https://img.shields.io/badge/YouTube-Demo-red?logo=youtube)](https://youtu.be/YexGlYJmP-A)
 
 ---
 
@@ -205,7 +205,3 @@ npm run bot:sepolia
 | **Infrastructure** | Infura RPC, Etherscan API, Sepolia Testnet |
 
 ---
-
-## 📄 License
-
-This project is licensed under the MIT License.
