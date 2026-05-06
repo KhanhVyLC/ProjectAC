@@ -1,24 +1,20 @@
-//D:\Coding\Project\frontend\src\contracts.js
 export const ADDRESSES = {
-  MockUSDC:    "0x95Ce0727BEc8bc18E8d75408f33E02612035c7AD",
-  VaultManager:"0x69a66669E9cC35102B24C716A122338730cC25f5",
-  SavingCore:  "0x9e9a8A661d1F556DC876651b8B2b92CbDceda3fb",
+  MockUSDC:    "0xE6C9a4Df368C0BD90fCdBA7bA4f2fe08B1E9Bef4",
+  VaultManager:"0x311F1D9b86D3EBBF54Fa5a67378adABB8957B721",
+  SavingCore:  "0xCB2F28B6c562c4EBC8dF1ccCa5214097854B0D6b",
 };
-
 export const ERC20_ABI = [
   "function balanceOf(address) view returns (uint256)",
   "function approve(address spender, uint256 amount) returns (bool)",
   "function allowance(address owner, address spender) view returns (uint256)",
   "function decimals() view returns (uint8)",
 ];
-
 export const VAULT_ABI = [
   "function vaultBalance() view returns (uint256)",
   "function feeReceiver() view returns (address)",
   "function fundVault(uint256 amount)",
   "function withdrawVault(uint256 amount)",
 ];
-
 export const CORE_ABI = [
   // Views
   "function nextPlanId() view returns (uint256)",
@@ -27,6 +23,7 @@ export const CORE_ABI = [
   "function getDeposit(uint256 depositId) view returns (tuple(uint256 planId, uint256 principal, uint256 aprBpsAtOpen, uint256 penaltyBpsAtOpen, uint256 tenorSeconds, uint256 startAt, uint256 maturityAt, uint8 status))",
   "function ownerOf(uint256 tokenId) view returns (address)",
   "function calcInterest(uint256 principal, uint256 aprBps, uint256 tenorSeconds) pure returns (uint256)",
+  "function gracePeriod() view returns (uint256)",   // ← THÊM MỚI
   // Transactions
   "function openDeposit(uint256 planId, uint256 amount) returns (uint256)",
   "function withdrawAtMaturity(uint256 depositId)",
