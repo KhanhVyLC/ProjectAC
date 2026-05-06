@@ -112,6 +112,13 @@ contract SavingCore is ERC721, Ownable, Pausable {
         uint256 interestPaid
     );
 
+    /// @notice Phát ra khi Admin force-close một deposit
+    event AdminForceClosed(
+        uint256 indexed depositId,
+        address indexed owner,
+        uint256 principal
+    );
+
     // ─────────────────────── Errors ───────────────────────
 
     error PlanNotFound(uint256 planId);
@@ -189,13 +196,41 @@ contract SavingCore is ERC721, Ownable, Pausable {
         emit PlanDisabled(planId);
     }
 
-    /// @notice Admin thay đổi grace period (min 1 giờ, max 30 ngày)
+    /// @notice Admin thay đổi grace period (min 1 giây, max 30 ngày)
     /// @param newGracePeriod Thời gian tính bằng giây (ví dụ: 10000, 86400, 259200)
     function setGracePeriod(uint256 newGracePeriod) external onlyOwner {
         require(newGracePeriod > 0,        "Grace period phai lon hon 0");
         require(newGracePeriod <= 30 days, "Grace period qua dai");
         gracePeriod = newGracePeriod;
         emit GracePeriodUpdated(newGracePeriod);
+    }
+
+    /// @notice Admin force-close một deposit bất kỳ — chỉ trả gốc, không trả lãi
+    /// @dev Dùng để xử lý deposit lỗi (APR sai, vault không đủ, v.v.)
+    /// @param depositId Token ID của deposit cần đóng
+    function adminForceClose(uint256 depositId) external onlyOwner {
+        DepositCert storage cert = deposits[depositId];
+        require(cert.status == DepositStatus.Active, "Not active");
+
+        address owner     = ownerOf(depositId);
+        uint256 principal = cert.principal;
+
+        uint256 interestWouldOwed = _calcInterest(
+            cert.principal,
+            cert.aprBpsAtOpen,
+            cert.tenorSeconds
+        );
+
+        cert.status = DepositStatus.Withdrawn;
+        totalPrincipalLocked -= principal;
+        if (totalInterestOwed >= interestWouldOwed)
+            totalInterestOwed -= interestWouldOwed;
+
+        // Trả gốc về cho owner, không trả lãi
+        token.safeTransfer(owner, principal);
+
+        emit AdminForceClosed(depositId, owner, principal);
+        emit Withdrawn(depositId, owner, principal, 0, false);
     }
 
     /// @notice Admin kiểm tra tính toàn vẹn — actual vs sổ sách
@@ -358,10 +393,18 @@ contract SavingCore is ERC721, Ownable, Pausable {
             cert.aprBpsAtOpen,
             cert.tenorSeconds
         );
-        uint256 newPrincipal = cert.principal + interest;
+        uint256 oldPrincipal = cert.principal;
+        uint256 newPrincipal = oldPrincipal + interest;
 
         // Pay interest from vault (covers the compounding)
         vault.payInterest(address(this), interest);
+
+        // ── FIX: cập nhật tracking trước khi đóng deposit cũ ──────────────
+        // Trừ principal + interestOwed của deposit cũ
+        totalPrincipalLocked -= oldPrincipal;
+        uint256 oldInterestOwed = _calcInterest(oldPrincipal, cert.aprBpsAtOpen, cert.tenorSeconds);
+        if (totalInterestOwed >= oldInterestOwed)
+            totalInterestOwed -= oldInterestOwed;
 
         // Mark old deposit as renewed
         cert.status = DepositStatus.ManualRenewed;
@@ -369,6 +412,11 @@ contract SavingCore is ERC721, Ownable, Pausable {
         // Mint new deposit NFT
         newDepositId = nextDepositId++;
         uint256 newMaturityAt = block.timestamp + newPlan.tenorSeconds;
+
+        // ── FIX: cộng principal + interestOwed của deposit mới ─────────────
+        uint256 newInterestOwed = _calcInterest(newPrincipal, newPlan.aprBps, newPlan.tenorSeconds);
+        totalPrincipalLocked += newPrincipal;
+        totalInterestOwed    += newInterestOwed;
 
         deposits[newDepositId] = DepositCert({
             planId:           newPlanId,
@@ -403,28 +451,44 @@ contract SavingCore is ERC721, Ownable, Pausable {
 
         address owner = ownerOf(depositId);
 
-        // Interest uses the APR snapshotted at original open (protects user)
         uint256 interest = _calcInterest(
             cert.principal,
             cert.aprBpsAtOpen,
             cert.tenorSeconds
         );
-        uint256 newPrincipal = cert.principal + interest;
+        uint256 oldPrincipal = cert.principal;
+        uint256 newPrincipal = oldPrincipal + interest;
 
-        // Pay interest from vault into this contract (compounds into principal)
         vault.payInterest(address(this), interest);
 
-        // Mark old deposit as auto-renewed
+        // ── FIX: Trừ tracking của deposit cũ ──────────────────────────────────
+        totalPrincipalLocked -= oldPrincipal;
+        uint256 oldInterestOwed = _calcInterest(
+            oldPrincipal,
+            cert.aprBpsAtOpen,
+            cert.tenorSeconds
+        );
+        if (totalInterestOwed >= oldInterestOwed)
+            totalInterestOwed -= oldInterestOwed;
+
         cert.status = DepositStatus.AutoRenewed;
 
-        // Mint new deposit — same tenor, APR locked to original
         newDepositId = nextDepositId++;
         uint256 newMaturityAt = block.timestamp + cert.tenorSeconds;
+
+        // ── FIX: Cộng tracking của deposit mới ────────────────────────────────
+        uint256 newInterestOwed = _calcInterest(
+            newPrincipal,
+            cert.aprBpsAtOpen,   // locked to original APR
+            cert.tenorSeconds
+        );
+        totalPrincipalLocked += newPrincipal;
+        totalInterestOwed    += newInterestOwed;
 
         deposits[newDepositId] = DepositCert({
             planId:           cert.planId,
             principal:        newPrincipal,
-            aprBpsAtOpen:     cert.aprBpsAtOpen,   // locked to original APR
+            aprBpsAtOpen:     cert.aprBpsAtOpen,
             penaltyBpsAtOpen: cert.penaltyBpsAtOpen,
             tenorSeconds:     cert.tenorSeconds,
             startAt:          block.timestamp,
