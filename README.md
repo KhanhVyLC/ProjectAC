@@ -28,9 +28,9 @@ ChainSave allows users to deposit assets (MockUSDC) into Saving Plans created by
 
 | Feature | Description |
 |---|---|
-| **Plan Management** | Create new plans (term, APR, min/max deposit, penalty fee), update APR, enable/disable plans. |
+| **Plan Management** | Create new plans (term, APR, min/max deposit, penalty fee), update APR, enable/disable plans, update fee receiver, update grace period. |
 | **Vault Management** | Fund the interest pool, withdraw funds, and monitor the solvency dashboard. |
-| **Security & Control** | Emergency Pause/Unpause the entire system, perform data integrity checks. |
+| **Security & Control** | Emergency Pause/Unpause the entire system. |
 
 ---
 
