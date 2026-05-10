@@ -12,27 +12,33 @@ ChainSave allows users to deposit assets (MockUSDC) into Saving Plans created by
 
 ---
 
-## 🌟 Features
-
-### 🧑‍💻 For Depositors
+### 🧑‍💻 For Depositors (Users)
 
 | Feature | Description |
 |---|---|
-| **Open Deposit** | Select a saving plan, lock USDC, and receive an NFT certificate. The APR is snapshotted at the moment of deposit. |
-| **Withdraw at Maturity** | Safely withdraw principal and earned interest from the Vault after the term ends. |
-| **Early Withdraw** | Withdraw at any time, subject to a penalty fee sent directly to the Fee Receiver. |
-| **Manual Renew** | Select a new plan and roll over accumulated interest into the principal for a new term. |
-| **Auto Renew** | If the Grace Period passes without withdrawal, the bot automatically renews the deposit at the original APR to protect the user's funds. |
+| **Dual Ownership Security** | **Innovative V2 Feature:** The system separates *Utility Rights* (NFT) from *Asset Rights* (Depositor wallet). Even if your wallet is compromised and the NFT is stolen, the hacker cannot withdraw your funds. Only the original depositor address can claim the principal and interest. |
+| **Open Deposit & Snapshot** | Users select an active saving plan, lock USDC, and receive a transferable ERC721 NFT certificate. The APR and Penalty rates are **snapshotted (immutable)** at the moment of deposit, protecting users from future admin rate changes. |
+| **NFT Composability** | The ERC721 certificate can be freely transferred, traded on secondary markets, or used as collateral in other DeFi protocols, all without compromising the core deposit's security. |
+| **Withdraw at Maturity** | Withdraw the exact principal plus accumulated simple interest. The interest is dynamically calculated using precision math (Basis Points) to avoid EVM rounding errors. |
+| **Early Withdraw** | Users can break the term early for emergency liquidity. No interest is paid, and a predetermined penalty fee is deducted from the principal and routed to the Treasury. |
+| **Manual Renew** | Users can manually roll over their matured deposit into a new plan. Earned interest is compounded into the new principal, saving gas compared to a separate withdraw-and-deposit action. |
+| **Auto Renew (Grace Period)** | If a user forgets to withdraw after the Grace Period (e.g., 3 days), the system automatically renews the deposit using the *original APR* to protect the user against rate drops. |
 
-### 👑 For Admins
+### 👑 For Admins (Treasury Management)
 
 | Feature | Description |
 |---|---|
-| **Plan Management** | Create new plans (term, APR, min/max deposit, penalty fee), update APR, enable/disable plans, update fee receiver, update grace period. |
-| **Vault Management** | Fund the interest pool, withdraw funds, and monitor the solvency dashboard. |
-| **Security & Control** | Emergency Pause/Unpause the entire system. |
+| **Dynamic Plan Management** | Create and configure diverse saving products (Tenor days, APR in basis points, Min/Max limits, Early withdrawal penalty rates). Admins can enable/disable plans at any time to control new deposits. |
+| **Vault Segregation** | User principals are locked securely in the `SavingCore`, while the interest payout pool is managed separately in the `VaultManager`. This prevents mixing funds and ensures accounting clarity. |
+| **Solvency Dashboard** | Built-in `financialSummary()` function allows Admins to monitor real-time system health (Total Principal Locked vs. Interest Owed vs. Available Vault Balance) to prevent liquidity shortfalls. |
+| **Emergency Circuit Breaker** | Inherits OpenZeppelin's `Pausable`. Admins can instantly freeze all withdrawals and renewals during a black swan event or identified vulnerability. |
 
----
+### 🛡️ Advanced Architecture & Automation
+
+| System Feature | Description |
+|---|---|
+| **Cross-Contract Authorization** | Strict access control modifiers (`onlySavingCore`). The Vault will only release funds or forward penalties when explicitly instructed by the core logic, preventing rogue Admin withdrawals. |
+| **Off-chain Keeper Bot** | A robust Node.js/TypeScript batch job runs daily to trigger `autoRenewDeposit` for overdue certificates. Includes smart fallback mechanisms (reading on-chain parameters first, falling back to `.env` if RPC fails). |
 
 ## 🏗 System Architecture
 
